@@ -1,0 +1,80 @@
+version: 0.1.0
+kind: target_contract
+intent: Men gateway architecture target (OpenClaw-inspired, Gong-separated)
+source_of_truth: docs/architecture/v1-architecture-plan.md
+
+allow_edges:
+  - caller: gateway_control_plane
+    callee: channel_ingress
+    rationale: routing and protocol coordination
+  - caller: gateway_control_plane
+    callee: channel_egress
+    rationale: dispatch output to outbound adapters
+  - caller: gateway_control_plane
+    callee: agent_runtime_bridge
+    rationale: gateway dispatches runtime requests
+  - caller: gateway_control_plane
+    callee: foundation_infra
+    rationale: gateway uses shared infra and contracts
+
+  - caller: channel_ingress
+    callee: gateway_control_plane
+    rationale: inbound events routed through control plane
+  - caller: channel_ingress
+    callee: foundation_infra
+    rationale: verify, dedupe, and persist inbound metadata
+  - caller: channel_ingress
+    callee: external_dependencies
+    rationale: ingress adapters use channel sdk/http verification and decode
+
+  - caller: channel_egress
+    callee: foundation_infra
+    rationale: delivery logging and retry policy
+  - caller: channel_egress
+    callee: external_dependencies
+    rationale: send payload to channel SDKs/APIs
+
+  - caller: agent_runtime_bridge
+    callee: foundation_infra
+    rationale: bridge uses config, telemetry, and persistence
+  - caller: agent_runtime_bridge
+    callee: external_dependencies
+    rationale: process and transport adapters only
+
+  - caller: plugin_tool_extension
+    callee: gateway_control_plane
+    rationale: plugin actions bind gateway session context
+  - caller: plugin_tool_extension
+    callee: foundation_infra
+    rationale: plugin runtime uses shared contracts
+
+  - caller: ops_client_entry
+    callee: gateway_control_plane
+    rationale: ops ui controls gateway
+  - caller: ops_client_entry
+    callee: foundation_infra
+    rationale: ops reads telemetry and config
+
+forbid_edges:
+  - caller: foundation_infra
+    callee: gateway_control_plane
+    rationale: infra must not depend on upper business layer
+  - caller: foundation_infra
+    callee: channel_ingress
+    rationale: infra must not call channel implementations
+  - caller: foundation_infra
+    callee: channel_egress
+    rationale: infra must not call channel implementations
+  - caller: foundation_infra
+    callee: agent_runtime_bridge
+    rationale: infra must not call runtime bridge
+  - caller: foundation_infra
+    callee: plugin_tool_extension
+    rationale: infra must not depend on plugin implementations
+
+  - caller: external_dependencies
+    callee: gateway_control_plane
+    rationale: external adapters cannot drive control plane internals
+  - caller: external_dependencies
+    callee: ops_client_entry
+    rationale: external adapters cannot depend on ops layer

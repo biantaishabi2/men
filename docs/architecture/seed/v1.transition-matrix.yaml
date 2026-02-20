@@ -1,0 +1,39 @@
+version: 0.1.0
+kind: transition_contract
+base: docs/architecture/seed/v1.target-matrix.yaml
+intent: Men MVP transition rules (strict target + explicit temporary debt)
+
+notes:
+  - temporary edges are only for MVP bootstrap and must be removed phase by phase
+
+temporary_allow_edges:
+  - caller: channel_ingress
+    callee: agent_runtime_bridge
+    owner: gateway-team
+    due: 2026-03-20
+    reason: initial webhook-to-runtime happy path without full dispatch split
+
+  - caller: ops_client_entry
+    callee: agent_runtime_bridge
+    owner: gateway-team
+    due: 2026-03-20
+    reason: temporary manual debug controls from LiveView
+
+  - caller: gateway_control_plane
+    callee: external_dependencies
+    owner: gateway-team
+    due: 2026-03-15
+    reason: temporary direct callback sender before egress extraction
+
+blocked_edges:
+  - caller: foundation_infra
+    callee: gateway_control_plane
+    owner: infra-team
+    priority: P0
+    reason: hard layer inversion
+
+  - caller: external_dependencies
+    callee: gateway_control_plane
+    owner: integration-team
+    priority: P0
+    reason: wrong dependency direction

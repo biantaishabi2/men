@@ -1,0 +1,20 @@
+version: 0.1.0
+kind: verification_gates
+intent: Men architecture acceptance gates
+
+profiles:
+  transition:
+    max_unexpected_edges_count: 0
+    max_forbidden_edges_count: 2
+    max_forbidden_total_edges: 20
+    max_missing_edges_count: 0
+    max_directed_density_pct: 55
+    max_bidirectional_pair_count: 8
+
+  target:
+    max_unexpected_edges_count: 0
+    max_forbidden_edges_count: 0
+    max_forbidden_total_edges: 0
+    max_missing_edges_count: 0
+    max_directed_density_pct: 40
+    max_bidirectional_pair_count: 5

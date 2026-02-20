@@ -1,0 +1,93 @@
+version: 0.1.0
+source_of_truth: men_docs
+generated_at: 2026-02-20
+sources:
+  - docs/architecture/openclaw-analysis-sources.md
+  - docs/architecture/v1-architecture-plan.md
+
+modules:
+  - module_id: gateway_control_plane
+    display_name: Gateway Control Plane
+    domain_kind: business
+    layer: application
+    precedence: 10
+    path_rules:
+      include:
+        - lib/men/gateway/**
+        - lib/men/routing/**
+        - lib/men/session_registry/**
+
+  - module_id: channel_ingress
+    display_name: Channel Ingress
+    domain_kind: business
+    layer: application
+    precedence: 20
+    path_rules:
+      include:
+        - lib/men/channels/ingress/**
+        - lib/men_web/controllers/webhooks/**
+
+  - module_id: channel_egress
+    display_name: Channel Egress
+    domain_kind: business
+    layer: application
+    precedence: 30
+    path_rules:
+      include:
+        - lib/men/channels/egress/**
+        - lib/men/channels/renderers/**
+
+  - module_id: agent_runtime_bridge
+    display_name: Agent Runtime Bridge
+    domain_kind: business
+    layer: application
+    precedence: 40
+    path_rules:
+      include:
+        - lib/men/runtime_bridge/**
+
+  - module_id: plugin_tool_extension
+    display_name: Plugin Tool Extension
+    domain_kind: business
+    layer: application
+    precedence: 50
+    path_rules:
+      include:
+        - lib/men/plugins/**
+
+  - module_id: foundation_infra
+    display_name: Foundation Infra
+    domain_kind: infrastructure
+    layer: infrastructure
+    precedence: 60
+    path_rules:
+      include:
+        - lib/men/config/**
+        - lib/men/infra/**
+        - lib/men/storage/**
+        - lib/men/telemetry/**
+        - lib/men/security/**
+        - lib/men/idempotency/**
+        - lib/men/repo.ex
+        - lib/men/application.ex
+
+  - module_id: ops_client_entry
+    display_name: Ops Client Entry
+    domain_kind: infrastructure
+    layer: infrastructure
+    precedence: 70
+    path_rules:
+      include:
+        - lib/men_web/live/**
+        - lib/men_web/controllers/ops/**
+        - lib/mix/tasks/**
+
+  - module_id: external_dependencies
+    display_name: External Dependencies
+    domain_kind: infrastructure
+    layer: infrastructure
+    precedence: 80
+    path_rules:
+      include:
+        - lib/men/integrations/**
+        - lib/men/adapters/external/**
