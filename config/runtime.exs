@@ -7,6 +7,19 @@ import Config
 # any compile-time configuration in here, as it won't be applied.
 # The block below contains prod specific runtime configuration.
 
+runtime_bridge_impl =
+  case System.get_env("RUNTIME_BRIDGE_IMPL") do
+    "mock" -> Men.RuntimeBridge.Mock
+    _ -> Men.RuntimeBridge.GongCLI
+  end
+
+config :men, :runtime_bridge,
+  # 支持仅通过配置切换 bridge 实现，不做运行时动态开关。
+  bridge_impl: runtime_bridge_impl,
+  timeout_ms: String.to_integer(System.get_env("RUNTIME_BRIDGE_TIMEOUT_MS") || "30000"),
+  max_concurrency: String.to_integer(System.get_env("RUNTIME_BRIDGE_MAX_CONCURRENCY") || "10"),
+  backpressure_strategy: :reject
+
 # ## Using releases
 #
 # If you use `mix release`, you need to explicitly enable the server
