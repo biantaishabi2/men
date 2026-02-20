@@ -168,7 +168,8 @@ defmodule Men.RuntimeBridge.GongCLI do
         @default_outer_shutdown_timeout_ms
       )
 
-    wait_ms = timeout_ms + wait_buffer_ms
+    # 外层守卫等待窗口需要覆盖内层超时清理时间，避免过早 shutdown 打断清理。
+    wait_ms = timeout_ms + wait_buffer_ms + shutdown_timeout_ms
 
     case Task.yield(task, wait_ms) do
       {:ok, result} ->

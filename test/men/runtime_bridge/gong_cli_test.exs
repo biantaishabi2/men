@@ -159,7 +159,7 @@ defmodule Men.RuntimeBridge.GongCLITest do
       Application.get_env(:men, :runtime_bridge, [])
       |> Keyword.put(:timeout_ms, 20)
       |> Keyword.put(:outer_wait_buffer_ms, 0)
-      |> Keyword.put(:outer_shutdown_timeout_ms, 500)
+      |> Keyword.put(:outer_shutdown_timeout_ms, 0)
     )
 
     result =
@@ -174,6 +174,26 @@ defmodule Men.RuntimeBridge.GongCLITest do
     assert error.code == "CLI_TIMEOUT"
     assert is_binary(error.details.cleanup_result)
     assert String.contains?(error.details.cleanup_result, "outer_guard")
+  end
+
+  test "外层等待窗口覆盖清理时间时不应提前打断内层清理" do
+    Application.put_env(:men, :runtime_bridge,
+      Application.get_env(:men, :runtime_bridge, [])
+      |> Keyword.put(:timeout_ms, 20)
+      |> Keyword.put(:outer_wait_buffer_ms, 0)
+      |> Keyword.put(:outer_shutdown_timeout_ms, 500)
+    )
+
+    result =
+      GongCLI.start_turn("child_timeout", %{
+        request_id: "req-inner-cleanup",
+        session_key: "sess-inner-cleanup",
+        run_id: "run-inner-cleanup"
+      })
+
+    assert {:error, error} = result
+    assert error.type == :timeout
+    refute String.contains?(error.details.cleanup_result, "outer_guard")
   end
 
   test "空 prompt 仍按统一协议返回结果" do
