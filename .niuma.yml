@@ -45,7 +45,6 @@ workflow:
     - "mix.lock"
     - "README.md"
     - ".github/workflows/"
-    - ".github/scripts/"
   implement_trigger_labels:
     - "bot:plan-final"
 
