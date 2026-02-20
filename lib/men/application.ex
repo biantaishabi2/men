@@ -14,6 +14,8 @@ defmodule Men.Application do
       {Phoenix.PubSub, name: Men.PubSub},
       # Start the Finch HTTP client for sending emails
       {Finch, name: Men.Finch},
+      # Gateway L1 主状态机
+      {Men.Gateway.DispatchServer, []},
       # Start a worker by calling: Men.Worker.start_link(arg)
       # {Men.Worker, arg},
       # Start to serve requests, typically the last entry

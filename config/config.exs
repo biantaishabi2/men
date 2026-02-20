@@ -11,6 +11,11 @@ config :men,
   ecto_repos: [Men.Repo],
   generators: [timestamp_type: :utc_datetime]
 
+config :men, Men.Gateway.DispatchServer,
+  bridge_adapter: Men.RuntimeBridge.GongCLI,
+  egress_adapter: Men.Gateway.DispatchServer.NoopEgress,
+  storage_adapter: :memory
+
 # Configures the endpoint
 config :men, MenWeb.Endpoint,
   url: [host: "localhost"],
