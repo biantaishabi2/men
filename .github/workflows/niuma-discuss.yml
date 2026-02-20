@@ -41,6 +41,8 @@ jobs:
     uses: biantaishabi2/Cli/.github/workflows/niuma-discuss-reusable.yml@master
     with:
       repo: ${{ github.repository }}
+      workflow_source_repo: biantaishabi2/Cli
+      workflow_source_ref: master
       issue_number: ${{ format('{0}', github.event.issue.number) }}
       build_niuma: false
     secrets: inherit
@@ -56,6 +58,8 @@ jobs:
     uses: biantaishabi2/Cli/.github/workflows/niuma-discuss-reusable.yml@master
     with:
       repo: ${{ github.repository }}
+      workflow_source_repo: biantaishabi2/Cli
+      workflow_source_ref: master
       issue_number: ${{ format('{0}', github.event.issue.number) }}
       build_niuma: false
     secrets: inherit
@@ -66,6 +70,8 @@ jobs:
     uses: biantaishabi2/Cli/.github/workflows/niuma-discuss-reusable.yml@master
     with:
       repo: ${{ github.repository }}
+      workflow_source_repo: biantaishabi2/Cli
+      workflow_source_ref: master
       issue_number: ${{ format('{0}', inputs.issue) }}
       max_discussion_rounds: ${{ inputs.max_discussion_rounds }}
       visible_round_interval: ${{ inputs.visible_round_interval }}

@@ -21,6 +21,8 @@ jobs:
     uses: biantaishabi2/Cli/.github/workflows/niuma-iterate-reusable.yml@master
     with:
       repo: ${{ github.repository }}
+      workflow_source_repo: biantaishabi2/Cli
+      workflow_source_ref: master
       issue_number: ${{ format('{0}', github.event.issue.number) }}
       trigger_source: review
       build_niuma: false
@@ -56,6 +58,8 @@ jobs:
     uses: biantaishabi2/Cli/.github/workflows/niuma-iterate-reusable.yml@master
     with:
       repo: ${{ github.repository }}
+      workflow_source_repo: biantaishabi2/Cli
+      workflow_source_ref: master
       issue_number: ${{ needs.extract-issue-from-pr.outputs.issue_number }}
       pr_number: ${{ format('{0}', github.event.pull_request.number) }}
       trigger_source: human

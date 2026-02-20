@@ -17,7 +17,10 @@ jobs:
     uses: biantaishabi2/Cli/.github/workflows/niuma-implement-reusable.yml@master
     with:
       repo: ${{ github.repository }}
+      workflow_source_repo: biantaishabi2/Cli
+      workflow_source_ref: master
       issue_number: ${{ format('{0}', github.event.issue.number) }}
       build_niuma: false
       gate_max_retries: ${{ vars.NIUMA_INTEGRATION_GATE_MAX_RETRIES || '2' }}
+      trigger_label: ${{ github.event.label.name }}
     secrets: inherit
