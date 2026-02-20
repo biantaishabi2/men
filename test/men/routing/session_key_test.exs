@@ -27,8 +27,20 @@ defmodule Men.Routing.SessionKeyTest do
     assert {:ok, "dingtalk:u456"} = SessionKey.build(attrs)
   end
 
+  test "可选字段为空字符串时会被忽略" do
+    attrs = %{channel: "feishu", user_id: "user_123", group_id: "", thread_id: ""}
+
+    assert {:ok, "feishu:user_123"} = SessionKey.build(attrs)
+  end
+
   test "非法字段值被拒绝" do
     attrs = %{channel: "feishu", user_id: "user:bad"}
+
+    assert {:error, :invalid_segment} = SessionKey.build(attrs)
+  end
+
+  test "可选字段包含非法字符时返回错误" do
+    attrs = %{channel: "feishu", user_id: "user_123", group_id: "grp:bad"}
 
     assert {:error, :invalid_segment} = SessionKey.build(attrs)
   end
