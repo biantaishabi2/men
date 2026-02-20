@@ -154,6 +154,93 @@ defmodule Men.RuntimeBridge.GongCLITest do
     assert success > 0
   end
 
+  test "外层 Task.shutdown/2 兜底路径可返回统一超时结构" do
+    Application.put_env(:men, :runtime_bridge,
+      Application.get_env(:men, :runtime_bridge, [])
+      |> Keyword.put(:timeout_ms, 20)
+      |> Keyword.put(:outer_wait_buffer_ms, 0)
+      |> Keyword.put(:outer_shutdown_timeout_ms, 500)
+    )
+
+    result =
+      GongCLI.start_turn("child_timeout", %{
+        request_id: "req-outer-guard",
+        session_key: "sess-outer-guard",
+        run_id: "run-outer-guard"
+      })
+
+    assert {:error, error} = result
+    assert error.type == :timeout
+    assert error.code == "CLI_TIMEOUT"
+    assert is_binary(error.details.cleanup_result)
+    assert String.contains?(error.details.cleanup_result, "outer_guard")
+  end
+
+  test "空 prompt 仍按统一协议返回结果" do
+    result =
+      GongCLI.start_turn("", %{
+        request_id: "req-empty-prompt",
+        session_key: "sess-empty-prompt",
+        run_id: "run-empty-prompt"
+      })
+
+    assert {:ok, payload} = result
+    assert is_binary(payload.text)
+    assert payload.meta.run_id == "run-empty-prompt"
+  end
+
+  test "非法 context 抛出 ArgumentError" do
+    assert_raise ArgumentError, fn ->
+      GongCLI.start_turn("ok", :invalid_context)
+    end
+  end
+
+  test "命令不存在时返回统一失败结构" do
+    Application.put_env(:men, :runtime_bridge,
+      Application.get_env(:men, :runtime_bridge, [])
+      |> Keyword.put(:command, "men_missing_cli_#{System.unique_integer([:positive, :monotonic])}")
+    )
+
+    result =
+      GongCLI.start_turn("ok", %{
+        request_id: "req-missing-command",
+        session_key: "sess-missing-command",
+        run_id: "run-missing-command"
+      })
+
+    assert {:error, error} = result
+    assert error.type == :failed
+    assert error.code == "CLI_EXIT_127"
+    assert String.contains?(error.message, "non-zero status 127")
+    assert error.details.exit_code == 127
+  end
+
+  test "不可执行命令路径返回统一失败结构" do
+    script_path =
+      Path.join(System.tmp_dir!(), "men_fake_non_exec_#{System.unique_integer([:positive, :monotonic])}.sh")
+
+    File.write!(script_path, "#!/usr/bin/env bash\necho should_not_run\n")
+    File.chmod!(script_path, 0o644)
+
+    Application.put_env(:men, :runtime_bridge,
+      Application.get_env(:men, :runtime_bridge, [])
+      |> Keyword.put(:command, script_path)
+    )
+
+    result =
+      GongCLI.start_turn("ok", %{
+        request_id: "req-non-exec",
+        session_key: "sess-non-exec",
+        run_id: "run-non-exec"
+      })
+
+    assert {:error, error} = result
+    assert error.type == :failed
+    assert error.code == "CLI_EXIT_127"
+    assert String.contains?(error.message, "non-zero status 127")
+    assert error.details.exit_code == 127
+  end
+
   defp reset_counter do
     case :ets.info(:men_runtime_bridge_counter) do
       :undefined -> :ok

@@ -13,6 +13,8 @@ defmodule Men.RuntimeBridge.GongCLI do
   @default_timeout_ms 30_000
   @default_max_concurrency 10
   @default_backpressure_strategy :reject
+  @default_outer_wait_buffer_ms 2_000
+  @default_outer_shutdown_timeout_ms 5_000
 
   @impl true
   def start_turn(prompt, context) when is_binary(prompt) and is_map(context) do
@@ -141,28 +143,41 @@ defmodule Men.RuntimeBridge.GongCLI do
 
     case resolve_command_path(command) do
       {:ok, command_path} ->
-        run_port_command_with_task_timeout(command_path, args, timeout_ms)
+        run_port_command_with_task_timeout(command_path, args, timeout_ms, cfg)
 
       :error ->
         {:error, "command not found: #{command}", 127, :not_started}
     end
   end
 
-  defp run_port_command_with_task_timeout(command_path, args, timeout_ms) do
+  defp run_port_command_with_task_timeout(command_path, args, timeout_ms, cfg) do
     task =
       Task.async(fn ->
         run_port_command(command_path, args, timeout_ms)
       end)
 
-    wait_ms = timeout_ms + 100
+    wait_buffer_ms =
+      normalize_non_negative_integer(
+        Keyword.get(cfg, :outer_wait_buffer_ms, @default_outer_wait_buffer_ms),
+        @default_outer_wait_buffer_ms
+      )
+
+    shutdown_timeout_ms =
+      normalize_non_negative_integer(
+        Keyword.get(cfg, :outer_shutdown_timeout_ms, @default_outer_shutdown_timeout_ms),
+        @default_outer_shutdown_timeout_ms
+      )
+
+    wait_ms = timeout_ms + wait_buffer_ms
 
     case Task.yield(task, wait_ms) do
       {:ok, result} ->
         result
 
       nil ->
-        shutdown_result = Task.shutdown(task, 1_000)
-        {:timeout, "", %{task_shutdown: inspect(shutdown_result)}}
+        shutdown_result = Task.shutdown(task, shutdown_timeout_ms)
+        final_shutdown_result = if is_nil(shutdown_result), do: Task.shutdown(task, :brutal_kill), else: shutdown_result
+        {:timeout, "", %{task_shutdown: inspect(final_shutdown_result), source: :outer_guard}}
     end
   end
 
@@ -383,6 +398,12 @@ defmodule Men.RuntimeBridge.GongCLI do
   defp generate_run_id do
     "run_" <> Integer.to_string(System.unique_integer([:positive, :monotonic]), 16)
   end
+
+  defp normalize_non_negative_integer(value, default)
+       when is_integer(value) and value >= 0,
+       do: value
+
+  defp normalize_non_negative_integer(_value, default), do: default
 
   defp runtime_config do
     Application.get_env(:men, :runtime_bridge, [])
