@@ -400,7 +400,7 @@ defmodule Men.RuntimeBridge.GongCLI do
     "run_" <> Integer.to_string(System.unique_integer([:positive, :monotonic]), 16)
   end
 
-  defp normalize_non_negative_integer(value, default)
+  defp normalize_non_negative_integer(value, _default)
        when is_integer(value) and value >= 0,
        do: value
 
