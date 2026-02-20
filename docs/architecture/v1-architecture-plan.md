@@ -79,6 +79,46 @@ V1 contract (minimum):
 Contract rule:
 - `men` only calls bridge contract (`agent_runtime_bridge`), never imports `gong` internals.
 
+## Why OTP First (architecture rationale)
+
+This gateway is not a simple request-response app. The core path is:
+`Ingress -> Route/Session -> Dispatch -> RuntimeBridge -> Egress`,
+and it is event-driven, long-lived, and async by nature.
+
+When this is implemented with ad-hoc server glue, common issues grow quickly:
+1. scattered state machines across files
+2. re-entrancy / race cleanup logic
+3. manual retry/recovery and lifecycle guards
+4. event fan-out and subscriber leak risk
+
+For `men`, we prefer OTP-native structure:
+1. `GenServer` for session/run state ownership
+2. `Task.Supervisor` for async tool/runtime work
+3. `Phoenix.PubSub` for event distribution
+4. supervision tree for restart/recovery guarantees
+
+This keeps channel adapters thin and keeps control-plane logic stable while scaling
+from single-channel to multi-channel integrations.
+
+## Runtime Semantics (Frame Model)
+
+1. `context as a frame`
+- each inference cycle consumes a HUD-like state frame, not full chat transcript replay
+- frame includes: inbox events, tool states, subscriptions, limits, memory pressure
+
+2. `event-first + timer-backup`
+- event triggers are primary (webhook, subscription change, tool completion)
+- timer ticks are backup (timeout check, retry, health sweep)
+
+3. `async cognitive loop`
+- tool calls are async and return immediately
+- runtime keeps progressing without blocking
+- tool result re-enters inbox and is processed in next frame
+
+4. `resident process model`
+- agent/session loop should be long-lived process state
+- avoid per-request reconstruction of runtime state
+
 ## Initial Implementation Sequence
 
 1. scaffold module directories and behaviours

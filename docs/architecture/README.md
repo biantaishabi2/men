@@ -14,6 +14,9 @@ Seed files:
 - `seed/v1.gates.yaml`: acceptance gates for transition and target
 - `openclaw-analysis-sources.md`: imported findings from `Cli` and `gong`
 - `v1-architecture-plan.md`: top-down module plan for implementation
+- `channel-integration-references.md`: DingTalk/Webhook reusable reference index
+  - includes OTP-first rationale for event-driven autonomous gateway design
+- `solum-runtime-notes.md`: runtime semantics from Solum draft (frame/HUD, async cognitive loop, BEAM fit)
 
 Execution order:
 1. implement directory/module skeleton by `v1.module-registry.seed.yaml`
