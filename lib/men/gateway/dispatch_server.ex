@@ -70,7 +70,7 @@ defmodule Men.Gateway.DispatchServer do
 
       {:bridge_error, error_payload, context} ->
         error_payload = ensure_error_egress_result(state, context, error_payload)
-        new_state = mark_processed(state, context)
+        new_state = maybe_mark_processed(state, context, error_payload)
         {:reply, {:error, build_error_result(context, error_payload)}, new_state}
 
       {:egress_error, reason, context} ->
@@ -82,7 +82,7 @@ defmodule Men.Gateway.DispatchServer do
         }
 
         error_payload = ensure_error_egress_result(state, context, error_payload)
-        new_state = mark_processed(state, context)
+        new_state = maybe_mark_processed(state, context, error_payload)
         {:reply, {:error, build_error_result(context, error_payload)}, new_state}
 
       {:error, reason} ->
@@ -258,6 +258,10 @@ defmodule Men.Gateway.DispatchServer do
         session_last_context: Map.put(state.session_last_context, context.session_key, context)
     }
   end
+
+  # egress 失败时不记录已处理，允许同 run_id 做恢复性重试。
+  defp maybe_mark_processed(state, _context, %{code: "EGRESS_ERROR"}), do: state
+  defp maybe_mark_processed(state, context, _error_payload), do: mark_processed(state, context)
 
   defp build_dispatch_result(context, bridge_payload) do
     %{

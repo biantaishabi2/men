@@ -178,6 +178,32 @@ defmodule Men.Gateway.DispatchServerTest do
     refute_receive {:egress_called, "feishu:u300", %ErrorMessage{}}
   end
 
+  test "egress 失败返回 EGRESS_ERROR 时不标记 processed，可同 run_id 重试" do
+    Application.put_env(:men, :dispatch_server_test_fail_final_egress, :downstream_unavailable)
+
+    server =
+      start_supervised!(
+        {DispatchServer, bridge_adapter: MockBridge, egress_adapter: MockEgress}
+      )
+
+    event = %{
+      request_id: "req-3b",
+      run_id: "retryable-run-id",
+      payload: "hello",
+      channel: "feishu",
+      user_id: "u301"
+    }
+
+    assert {:error, error_result} = DispatchServer.dispatch(server, event)
+    assert error_result.code == "EGRESS_ERROR"
+
+    Application.delete_env(:men, :dispatch_server_test_fail_final_egress)
+
+    assert {:ok, result} = DispatchServer.dispatch(server, event)
+    assert result.run_id == "retryable-run-id"
+    assert {:ok, :duplicate} = DispatchServer.dispatch(server, event)
+  end
+
   test "同 session 连续消息: session_key 一致且可连续处理" do
     server =
       start_supervised!(
