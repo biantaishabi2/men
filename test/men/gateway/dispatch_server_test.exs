@@ -43,7 +43,20 @@ defmodule Men.Gateway.DispatchServerTest do
     @impl true
     def send(target, message) do
       notify({:egress_called, target, message})
-      :ok
+
+      case {Application.get_env(:men, :dispatch_server_test_fail_final_egress), message} do
+        {reason, %Men.Channels.Egress.Messages.FinalMessage{}} when not is_nil(reason) ->
+          {:error, reason}
+
+        _ ->
+          case {Application.get_env(:men, :dispatch_server_test_fail_error_egress), message} do
+            {reason, %Men.Channels.Egress.Messages.ErrorMessage{}} when not is_nil(reason) ->
+              {:error, reason}
+
+            _ ->
+              :ok
+          end
+      end
     end
 
     defp notify(message) do
@@ -57,9 +70,13 @@ defmodule Men.Gateway.DispatchServerTest do
 
   setup do
     Application.put_env(:men, :dispatch_server_test_pid, self())
+    Application.delete_env(:men, :dispatch_server_test_fail_final_egress)
+    Application.delete_env(:men, :dispatch_server_test_fail_error_egress)
 
     on_exit(fn ->
       Application.delete_env(:men, :dispatch_server_test_pid)
+      Application.delete_env(:men, :dispatch_server_test_fail_final_egress)
+      Application.delete_env(:men, :dispatch_server_test_fail_error_egress)
     end)
 
     :ok
@@ -116,6 +133,29 @@ defmodule Men.Gateway.DispatchServerTest do
     assert message.reason == "runtime bridge failed"
   end
 
+  test "error egress 失败: 调用方可感知 EGRESS_ERROR" do
+    Application.put_env(:men, :dispatch_server_test_fail_error_egress, :error_channel_unavailable)
+
+    server =
+      start_supervised!(
+        {DispatchServer, bridge_adapter: MockBridge, egress_adapter: MockEgress}
+      )
+
+    event = %{
+      request_id: "req-2b",
+      payload: "bridge_error",
+      channel: "feishu",
+      user_id: "u201"
+    }
+
+    assert {:error, error_result} = DispatchServer.dispatch(server, event)
+    assert error_result.code == "EGRESS_ERROR"
+    assert error_result.reason == "egress send failed"
+
+    assert_receive {:egress_called, "feishu:u201", %ErrorMessage{} = message}
+    assert message.code == "BRIDGE_FAIL"
+  end
+
   test "重复 run_id: 返回 duplicate 且不重复 egress" do
     server =
       start_supervised!(
@@ -168,5 +208,63 @@ defmodule Men.Gateway.DispatchServerTest do
 
     assert_receive {:bridge_called, "turn-1", %{session_key: "feishu:u400:t:t01"}}
     assert_receive {:bridge_called, "turn-2", %{session_key: "feishu:u400:t:t01"}}
+  end
+
+  test "同 run_id 并发提交: 只处理一次，其余命中 duplicate" do
+    server =
+      start_supervised!(
+        {DispatchServer, bridge_adapter: MockBridge, egress_adapter: MockEgress}
+      )
+
+    event = %{
+      request_id: "req-5",
+      run_id: "concurrent-run-id",
+      payload: "hello",
+      channel: "feishu",
+      user_id: "u500"
+    }
+
+    tasks =
+      for _ <- 1..2 do
+        Task.async(fn -> DispatchServer.dispatch(server, event) end)
+      end
+
+    results = Enum.map(tasks, &Task.await(&1, 2_000))
+
+    assert Enum.count(results, &match?({:ok, :duplicate}, &1)) == 1
+
+    assert Enum.count(results, fn
+             {:ok, %{run_id: "concurrent-run-id"}} -> true
+             _ -> false
+           end) == 1
+
+    assert_receive {:egress_called, "feishu:u500", %FinalMessage{}}
+    refute_receive {:egress_called, "feishu:u500", %FinalMessage{}}
+  end
+
+  test "关键边界输入: 非法 request_id / metadata 非 map / 路由字段不足" do
+    server =
+      start_supervised!(
+        {DispatchServer, bridge_adapter: MockBridge, egress_adapter: MockEgress}
+      )
+
+    invalid_events = [
+      %{request_id: "", payload: "hello", channel: "feishu", user_id: "u600"},
+      %{request_id: 123, payload: "hello", channel: "feishu", user_id: "u600"},
+      %{request_id: "req-6-3", payload: "hello", metadata: "bad", channel: "feishu", user_id: "u600"},
+      %{request_id: "req-6-4", payload: "hello"}
+    ]
+
+    for event <- invalid_events do
+      assert {:error, error_result} = DispatchServer.dispatch(server, event)
+      assert error_result.code == "INVALID_EVENT"
+      assert error_result.reason == "invalid inbound event"
+    end
+
+    assert_receive {:egress_called, _, %ErrorMessage{}}
+    assert_receive {:egress_called, _, %ErrorMessage{}}
+    assert_receive {:egress_called, _, %ErrorMessage{}}
+    assert_receive {:egress_called, _, %ErrorMessage{}}
+    refute_receive {:bridge_called, _, _}
   end
 end

@@ -69,7 +69,7 @@ defmodule Men.Gateway.DispatchServer do
         {:reply, {:ok, :duplicate}, state}
 
       {:bridge_error, error_payload, context} ->
-        _ = do_send_error(state, context, error_payload)
+        error_payload = ensure_error_egress_result(state, context, error_payload)
         new_state = mark_processed(state, context)
         {:reply, {:error, build_error_result(context, error_payload)}, new_state}
 
@@ -81,7 +81,7 @@ defmodule Men.Gateway.DispatchServer do
           details: %{reason: inspect(reason)}
         }
 
-        _ = do_send_error(state, context, error_payload)
+        error_payload = ensure_error_egress_result(state, context, error_payload)
         new_state = mark_processed(state, context)
         {:reply, {:error, build_error_result(context, error_payload)}, new_state}
 
@@ -95,8 +95,24 @@ defmodule Men.Gateway.DispatchServer do
           details: %{reason: inspect(reason)}
         }
 
-        _ = do_send_error(state, synthetic_context, error_payload)
+        error_payload = ensure_error_egress_result(state, synthetic_context, error_payload)
         {:reply, {:error, build_error_result(synthetic_context, error_payload)}, state}
+    end
+  end
+
+  # 错误回写失败时统一抬升为 egress 失败，避免调用方误判。
+  defp ensure_error_egress_result(state, context, error_payload) do
+    case do_send_error(state, context, error_payload) do
+      :ok ->
+        error_payload
+
+      {:error, reason} ->
+        %{
+          type: :failed,
+          code: "EGRESS_ERROR",
+          message: "egress send failed",
+          details: %{reason: inspect(reason)}
+        }
     end
   end
 
