@@ -42,6 +42,8 @@ defmodule Men.Channels.Egress.AdapterTest do
 
     assert :ok = MockEgressAdapter.send(:user_target, final_msg)
     assert :ok = MockEgressAdapter.send(:user_target, error_msg)
-    assert {:error, :unsupported_message} = MockEgressAdapter.send(:user_target, %{content: "raw"})
+
+    assert {:error, :unsupported_message} =
+             MockEgressAdapter.send(:user_target, %{content: "raw"})
   end
 end

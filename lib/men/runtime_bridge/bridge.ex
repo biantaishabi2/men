@@ -5,5 +5,6 @@ defmodule Men.RuntimeBridge.Bridge do
 
   alias Men.RuntimeBridge.{ErrorResponse, Request, Response}
 
-  @callback call(Request.t(), opts :: keyword()) :: {:ok, Response.t()} | {:error, ErrorResponse.t()}
+  @callback call(Request.t(), opts :: keyword()) ::
+              {:ok, Response.t()} | {:error, ErrorResponse.t()}
 end

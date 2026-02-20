@@ -8,7 +8,8 @@ defmodule Men.RuntimeBridge.BridgeTest do
 
     @impl true
     def call(%Request{session_key: session_key, content: "ok"}, _opts) do
-      {:ok, %Response{session_key: session_key, content: "runtime-ok", metadata: %{source: :mock}}}
+      {:ok,
+       %Response{session_key: session_key, content: "runtime-ok", metadata: %{source: :mock}}}
     end
 
     def call(%Request{session_key: session_key}, _opts) do
@@ -32,7 +33,13 @@ defmodule Men.RuntimeBridge.BridgeTest do
 
   test "Response 和 ErrorResponse 结构体可构造" do
     resp = %Response{session_key: "feishu:u1", content: "done", metadata: %{token: "x"}}
-    err = %ErrorResponse{session_key: "feishu:u1", reason: "failed", code: "bad_input", metadata: %{}}
+
+    err = %ErrorResponse{
+      session_key: "feishu:u1",
+      reason: "failed",
+      code: "bad_input",
+      metadata: %{}
+    }
 
     assert resp.content == "done"
     assert err.reason == "failed"
@@ -44,6 +51,8 @@ defmodule Men.RuntimeBridge.BridgeTest do
     fail_req = %Request{session_key: "feishu:u1", content: "bad"}
 
     assert {:ok, %Response{content: "runtime-ok"}} = MockRuntimeBridge.call(ok_req, [])
-    assert {:error, %ErrorResponse{reason: "runtime-failed"}} = MockRuntimeBridge.call(fail_req, [])
+
+    assert {:error, %ErrorResponse{reason: "runtime-failed"}} =
+             MockRuntimeBridge.call(fail_req, [])
   end
 end
