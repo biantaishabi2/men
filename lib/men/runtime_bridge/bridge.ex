@@ -1,7 +1,13 @@
 defmodule Men.RuntimeBridge.Bridge do
   @moduledoc """
-  Runtime Bridge 统一契约。
+  Runtime Bridge 契约。
+
+  兼容两条调用路径：
+  - `call/2`: 结构体请求/响应契约（L0 基础契约）
+  - `start_turn/2`: GongCLI 统一语义契约（运行时桥接）
   """
+
+  alias Men.RuntimeBridge.{ErrorResponse, Request, Response}
 
   @type error_type :: :failed | :timeout | :overloaded
 
@@ -29,6 +35,11 @@ defmodule Men.RuntimeBridge.Bridge do
           optional(:run_id) => binary()
         }
 
+  @callback call(Request.t(), opts :: keyword()) ::
+              {:ok, Response.t()} | {:error, ErrorResponse.t()}
+
   @callback start_turn(prompt :: binary(), context :: turn_context()) ::
               {:ok, success_payload()} | {:error, error_payload()}
+
+  @optional_callbacks call: 2, start_turn: 2
 end
