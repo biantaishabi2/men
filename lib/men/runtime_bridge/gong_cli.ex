@@ -5,6 +5,8 @@ defmodule Men.RuntimeBridge.GongCLI do
 
   @behaviour Men.RuntimeBridge.Bridge
 
+  import Bitwise
+
   require Logger
 
   @counter_table :men_runtime_bridge_counter
@@ -139,32 +141,58 @@ defmodule Men.RuntimeBridge.GongCLI do
 
     case resolve_command_path(command) do
       {:ok, command_path} ->
-        run_port_command(command_path, args, timeout_ms)
+        run_port_command_with_task_timeout(command_path, args, timeout_ms)
 
       :error ->
         {:error, "command not found: #{command}", 127, :not_started}
     end
   end
 
+  defp run_port_command_with_task_timeout(command_path, args, timeout_ms) do
+    task =
+      Task.async(fn ->
+        run_port_command(command_path, args, timeout_ms)
+      end)
+
+    wait_ms = timeout_ms + 100
+
+    case Task.yield(task, wait_ms) do
+      {:ok, result} ->
+        result
+
+      nil ->
+        shutdown_result = Task.shutdown(task, 1_000)
+        {:timeout, "", %{task_shutdown: inspect(shutdown_result)}}
+    end
+  end
+
   defp run_port_command(command_path, args, timeout_ms) do
-    port =
-      Port.open({:spawn_executable, command_path}, [
-        :binary,
-        :exit_status,
-        :stderr_to_stdout,
-        :use_stdio,
-        :hide,
-        args: args
-      ])
+    try do
+      port =
+        Port.open({:spawn_executable, command_path}, [
+          :binary,
+          :exit_status,
+          :stderr_to_stdout,
+          :use_stdio,
+          :hide,
+          args: args
+        ])
 
-    os_pid =
-      case Port.info(port, :os_pid) do
-        {:os_pid, pid} -> pid
-        _ -> nil
-      end
+      os_pid =
+        case Port.info(port, :os_pid) do
+          {:os_pid, pid} -> pid
+          _ -> nil
+        end
 
-    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
-    await_port_result(port, os_pid, deadline_ms, "")
+      deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+      await_port_result(port, os_pid, deadline_ms, "")
+    catch
+      :error, reason ->
+        {:error, "failed to start command: #{inspect(reason)}", 127, :not_started}
+
+      :exit, reason ->
+        {:error, "failed to start command: #{inspect(reason)}", 127, :not_started}
+    end
   end
 
   # 统一在一个 receive 循环里处理输出、退出码和超时清理，避免遗留子进程。
@@ -243,7 +271,7 @@ defmodule Men.RuntimeBridge.GongCLI do
 
   defp resolve_command_path(command) do
     cond do
-      String.contains?(command, "/") and File.exists?(command) ->
+      String.contains?(command, "/") and executable_file?(command) ->
         {:ok, command}
 
       true ->
@@ -251,6 +279,13 @@ defmodule Men.RuntimeBridge.GongCLI do
           nil -> :error
           path -> {:ok, path}
         end
+    end
+  end
+
+  defp executable_file?(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> (mode &&& 0o111) != 0
+      _ -> false
     end
   end
 
@@ -286,15 +321,30 @@ defmodule Men.RuntimeBridge.GongCLI do
 
   defp release_slot do
     ensure_counter_table!()
-    _ = :ets.update_counter(@counter_table, :counter, {2, -1}, {:counter, 0})
+    current = :ets.update_counter(@counter_table, :counter, {2, -1}, {:counter, 0})
+
+    if current < 0 do
+      :ets.insert(@counter_table, {:counter, 0})
+    end
+
     :ok
   end
 
   defp ensure_counter_table! do
     case :ets.info(@counter_table) do
       :undefined ->
+        heir_pid = Process.whereis(:init)
+        table_opts = [:named_table, :public, :set, read_concurrency: true]
+
+        table_opts =
+          if is_pid(heir_pid) do
+            table_opts ++ [{:heir, heir_pid, :transfer}]
+          else
+            table_opts
+          end
+
         try do
-          :ets.new(@counter_table, [:named_table, :public, :set, read_concurrency: true])
+          :ets.new(@counter_table, table_opts)
         rescue
           ArgumentError -> :ok
         end

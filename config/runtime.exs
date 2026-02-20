@@ -13,11 +13,24 @@ runtime_bridge_impl =
     _ -> Men.RuntimeBridge.GongCLI
   end
 
+parse_positive_integer_env = fn env_name, default ->
+  case System.get_env(env_name) do
+    nil ->
+      default
+
+    value ->
+      case Integer.parse(value) do
+        {parsed, ""} when parsed > 0 -> parsed
+        _ -> default
+      end
+  end
+end
+
 config :men, :runtime_bridge,
   # 支持仅通过配置切换 bridge 实现，不做运行时动态开关。
   bridge_impl: runtime_bridge_impl,
-  timeout_ms: String.to_integer(System.get_env("RUNTIME_BRIDGE_TIMEOUT_MS") || "30000"),
-  max_concurrency: String.to_integer(System.get_env("RUNTIME_BRIDGE_MAX_CONCURRENCY") || "10"),
+  timeout_ms: parse_positive_integer_env.("RUNTIME_BRIDGE_TIMEOUT_MS", 30_000),
+  max_concurrency: parse_positive_integer_env.("RUNTIME_BRIDGE_MAX_CONCURRENCY", 10),
   backpressure_strategy: :reject
 
 # ## Using releases
