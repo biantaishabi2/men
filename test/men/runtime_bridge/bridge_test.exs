@@ -37,6 +37,19 @@ defmodule Men.RuntimeBridge.BridgeTest do
     end
 
     @impl true
+    def close(%Request{session_id: "missing"} = request, _opts) do
+      notify({:close_called, request})
+
+      {:error,
+       %Error{
+         code: :session_not_found,
+         message: "runtime session missing",
+         retryable: true,
+         context: %{source: :new}
+       }}
+    end
+
+    @impl true
     def close(%Request{} = request, _opts) do
       notify({:close_called, request})
       {:ok, %Response{runtime_id: request.runtime_id, session_id: request.session_id, payload: :closed, metadata: %{source: :new}}}
@@ -196,6 +209,16 @@ defmodule Men.RuntimeBridge.BridgeTest do
 
     assert {:error, error_payload} = Bridge.start_turn("missing", %{session_key: "sess-missing"})
     assert error_payload.code == "session_not_found"
+  end
+
+  test "close 对 session_not_found 在 Bridge 契约层幂等处理" do
+    request = %Request{runtime_id: "gong", session_id: "missing", payload: nil}
+
+    assert {:ok, %Response{} = response} = Bridge.close(request)
+    assert response.payload == :closed
+    assert response.metadata.idempotent == true
+    assert response.metadata.reason == :session_not_found
+    assert_receive {:close_called, %Request{session_id: "missing"}}
   end
 
   test "deprecated call 根据 feature flag 分流" do

@@ -46,7 +46,21 @@ defmodule Men.RuntimeBridge.Bridge do
   def prompt(%Request{} = request, opts \\ []), do: invoke_new(:prompt, request, opts)
 
   @spec close(Request.t(), keyword()) :: result()
-  def close(%Request{} = request, opts \\ []), do: invoke_new(:close, request, opts)
+  def close(%Request{} = request, opts \\ []) do
+    case invoke_new(:close, request, opts) do
+      {:error, %Error{code: :session_not_found}} ->
+        {:ok,
+         %Response{
+           runtime_id: normalize_runtime_id(request.runtime_id),
+           session_id: request.session_id,
+           payload: :closed,
+           metadata: %{idempotent: true, reason: :session_not_found}
+         }}
+
+      other ->
+        other
+    end
+  end
 
   @deprecated "请改用 open/get/prompt/close"
   @spec call(Request.t(), keyword()) :: {:ok, Response.t()} | {:error, ErrorResponse.t()}
