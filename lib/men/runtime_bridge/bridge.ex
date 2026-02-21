@@ -67,13 +67,13 @@ defmodule Men.RuntimeBridge.Bridge do
         adapter.call(request, opts)
 
       true ->
-        case prompt(request, opts) do
-          {:ok, %Response{} = response} ->
-            {:ok, response}
-
-          {:error, %Error{} = error} ->
-            {:error, to_legacy_error_response(error, request)}
-        end
+        {:error,
+         %ErrorResponse{
+           session_key: request.session_id || "unknown_session",
+           reason: "adapter does not implement call/2",
+           code: "unsupported_operation",
+           metadata: %{adapter: inspect(adapter), action: :call}
+         }}
     end
   end
 
