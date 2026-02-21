@@ -70,6 +70,15 @@ defmodule Men.RuntimeBridge.BridgeTest do
     end
   end
 
+  defmodule LegacyOnlyBridge do
+    @behaviour Men.RuntimeBridge.Bridge
+
+    @impl true
+    def start_turn(_prompt, _context) do
+      {:error, %{code: "NEW_REMOTE_ERROR", message: "legacy failed", details: %{source: :legacy_only}}}
+    end
+  end
+
   setup do
     original_runtime_bridge = Application.get_env(:men, :runtime_bridge, [])
     Application.put_env(:men, :runtime_bridge_test_pid, self())
@@ -181,5 +190,13 @@ defmodule Men.RuntimeBridge.BridgeTest do
     assert {:error, %ErrorResponse{} = error_response} = Bridge.call(request)
     assert error_response.code == "session_not_found"
     assert error_response.reason == "runtime session missing"
+  end
+
+  test "legacy start_turn 字符串错误码会安全降级，避免动态 atom" do
+    request = %Request{runtime_id: "gong", session_id: "sess-legacy", payload: "hello"}
+
+    assert {:error, %Error{} = error} = Bridge.prompt(request, adapter: LegacyOnlyBridge)
+    assert error.code == :runtime_error
+    assert error.context == %{source: :legacy_only}
   end
 end

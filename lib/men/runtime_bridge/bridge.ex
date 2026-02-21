@@ -291,8 +291,12 @@ defmodule Men.RuntimeBridge.Bridge do
     |> String.downcase()
     |> String.replace(~r/[^a-z0-9]+/, "_")
     |> case do
-      "" -> :runtime_error
-      normalized -> String.to_atom(normalized)
+      "timeout" -> :timeout
+      "session_not_found" -> :session_not_found
+      "transport_error" -> :transport_error
+      "runtime_error" -> :runtime_error
+      "unsupported_operation" -> :unsupported_operation
+      _ -> :runtime_error
     end
   end
 

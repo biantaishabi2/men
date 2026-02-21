@@ -60,10 +60,12 @@ defmodule Men.RuntimeBridge.GongRPC do
 
     case prompt(request, []) do
       {:ok, %Response{} = response} ->
+        metadata = normalize_metadata(response.metadata)
+
         {:ok,
          %{
            text: normalize_payload_text(response.payload),
-           meta: Map.merge(response.metadata, %{runtime_id: response.runtime_id, session_key: response.session_id})
+           meta: Map.merge(metadata, %{runtime_id: response.runtime_id, session_key: response.session_id})
          }}
 
       {:error, %Error{} = error} ->
@@ -155,7 +157,10 @@ defmodule Men.RuntimeBridge.GongRPC do
       runtime_id: normalize_runtime_id(Map.get(payload, :runtime_id) || Map.get(payload, "runtime_id") || request_payload.runtime_id),
       session_id: Map.get(payload, :session_id) || Map.get(payload, "session_id") || request_payload.session_id,
       payload: Map.get(payload, :payload, Map.get(payload, "payload")),
-      metadata: Map.get(payload, :metadata, Map.get(payload, "metadata", %{}))
+      metadata:
+        payload
+        |> Map.get(:metadata, Map.get(payload, "metadata", %{}))
+        |> normalize_metadata()
     }
   end
 
@@ -249,8 +254,12 @@ defmodule Men.RuntimeBridge.GongRPC do
     |> String.downcase()
     |> String.replace(~r/[^a-z0-9]+/, "_")
     |> case do
-      "" -> :runtime_error
-      normalized -> String.to_atom(normalized)
+      "timeout" -> :timeout
+      "session_not_found" -> :session_not_found
+      "transport_error" -> :transport_error
+      "runtime_error" -> :runtime_error
+      "unsupported_operation" -> :unsupported_operation
+      _ -> :runtime_error
     end
   end
 
@@ -260,6 +269,8 @@ defmodule Men.RuntimeBridge.GongRPC do
 
   defp normalize_payload_text(payload) when is_binary(payload), do: payload
   defp normalize_payload_text(payload), do: to_string(payload)
+  defp normalize_metadata(metadata) when is_map(metadata), do: metadata
+  defp normalize_metadata(_), do: %{}
 
   defp runtime_config, do: Application.get_env(:men, :runtime_bridge, [])
 end

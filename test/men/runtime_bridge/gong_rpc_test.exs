@@ -47,6 +47,18 @@ defmodule Men.RuntimeBridge.GongRPCTest do
        }}
     end
 
+    def prompt(%{payload: "nil_metadata"} = payload) do
+      {:ok,
+       %{
+         runtime_id: payload.runtime_id,
+         session_id: payload.session_id,
+         payload: "reply:nil-metadata",
+         metadata: nil
+       }}
+    end
+
+    def prompt(%{payload: "unknown_code"}), do: {:error, %{"code" => "NEW_REMOTE_ERROR", "message" => "new"}}
+
     def prompt(%{session_id: "missing"}) do
       {:error,
        %{
@@ -54,6 +66,16 @@ defmodule Men.RuntimeBridge.GongRPCTest do
          message: "runtime session not found",
          retryable: true,
          context: %{session_id: "missing"}
+       }}
+    end
+
+    def prompt(%{payload: %{deep: _} = deep_payload} = payload) do
+      {:ok,
+       %{
+         runtime_id: payload.runtime_id,
+         session_id: payload.session_id,
+         payload: deep_payload,
+         metadata: %{source: :fake_remote}
        }}
     end
 
@@ -200,5 +222,50 @@ defmodule Men.RuntimeBridge.GongRPCTest do
     end
 
     result
+  end
+
+  test "同一 session 并发调用行为稳定" do
+    request = %Request{runtime_id: "gong", session_id: "sess-concurrent", payload: "parallel"}
+
+    results =
+      1..12
+      |> Task.async_stream(fn _ -> GongRPC.prompt(request) end, timeout: 1_000, max_concurrency: 12)
+      |> Enum.to_list()
+
+    assert Enum.all?(results, fn
+             {:ok, {:ok, %Response{payload: "reply:parallel"}}} -> true
+             _ -> false
+           end)
+
+    for _ <- 1..12 do
+      assert_receive {:rpc_called, :"gong@test", FakeRemote, :prompt, %{session_id: "sess-concurrent"}, 120}
+    end
+  end
+
+  test "start_turn 遇到 metadata=nil 时不崩溃并回填 meta" do
+    assert {:ok, %{text: "reply:nil-metadata", meta: meta}} =
+             GongRPC.start_turn("nil_metadata", %{session_key: "sess-meta", runtime_id: "gong"})
+
+    assert meta.runtime_id == "gong"
+    assert meta.session_key == "sess-meta"
+  end
+
+  test "nil 与极值边界以及深层 payload 可稳定处理" do
+    nil_request = %Request{runtime_id: "gong", session_id: "sess-nil", payload: nil, timeout_ms: 0}
+    deep_payload = %{deep: %{level1: %{level2: [1, 2, %{k: "v"}]}}}
+    deep_request = %Request{runtime_id: "gong", session_id: "sess-deep", payload: deep_payload}
+
+    assert {:ok, %Response{payload: "reply:"}} = GongRPC.prompt(nil_request)
+    assert_receive {:rpc_called, :"gong@test", FakeRemote, :prompt, %{timeout_ms: 0}, 0}
+
+    assert {:ok, %Response{payload: ^deep_payload}} = GongRPC.prompt(deep_request)
+  end
+
+  test "未知字符串错误码降级为 runtime_error，避免动态 atom" do
+    request = %Request{runtime_id: "gong", session_id: "sess-unknown", payload: "unknown_code"}
+
+    assert {:error, %Error{} = error} = GongRPC.prompt(request)
+    assert error.code == :runtime_error
+    assert error.message == "new"
   end
 end
