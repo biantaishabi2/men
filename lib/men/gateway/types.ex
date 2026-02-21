@@ -55,4 +55,40 @@ defmodule Men.Gateway.Types do
           optional(:code) => binary() | nil,
           required(:metadata) => map()
         }
+
+  @typedoc """
+  SessionCoordinator 映射条目。
+  """
+  @type session_mapping_entry :: %{
+          required(:session_key) => binary(),
+          required(:runtime_session_id) => binary(),
+          required(:last_access_at) => integer(),
+          required(:expires_at) => integer()
+        }
+
+  @typedoc """
+  SessionCoordinator 运行配置。
+  """
+  @type session_coordinator_config :: %{
+          required(:enabled) => boolean(),
+          required(:ttl_ms) => pos_integer(),
+          required(:gc_interval_ms) => pos_integer(),
+          required(:max_entries) => pos_integer(),
+          required(:invalidation_codes) => [atom() | binary()]
+        }
+
+  @typedoc """
+  Session 失效原因，用于白名单错误码校验。
+  """
+  @type session_invalidation_reason ::
+          %{required(:session_key) => binary(), required(:code) => atom() | binary()}
+          | %{
+              required(:runtime_session_id) => binary(),
+              required(:code) => atom() | binary()
+            }
+          | %{
+              required(:session_key) => binary(),
+              required(:runtime_session_id) => binary(),
+              required(:code) => atom() | binary()
+            }
 end

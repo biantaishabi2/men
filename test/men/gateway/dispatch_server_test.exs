@@ -12,6 +12,15 @@ defmodule Men.Gateway.DispatchServerTest do
       notify({:bridge_called, prompt, context})
 
       cond do
+        prompt == "runtime_session_not_found" ->
+          {:error,
+           %{
+             type: :failed,
+             code: "runtime_session_not_found",
+             message: "runtime session missing",
+             details: %{source: :mock}
+           }}
+
         prompt == "bridge_error" ->
           {:error,
            %{
@@ -95,13 +104,53 @@ defmodule Men.Gateway.DispatchServerTest do
     :ok
   end
 
-  defp start_dispatch_server do
+  defp start_dispatch_server(opts \\ []) do
+    default_opts = [
+      name: {:global, {__MODULE__, self(), make_ref()}},
+      bridge_adapter: MockBridge,
+      egress_adapter: MockEgress,
+      session_coordinator_enabled: false
+    ]
+
     start_supervised!(
       {DispatchServer,
-       name: {:global, {__MODULE__, self(), make_ref()}},
-       bridge_adapter: MockBridge,
-       egress_adapter: MockEgress}
+       Keyword.merge(default_opts, opts)}
     )
+  end
+
+  defp start_transient_coordinator(mode) do
+    name = {:global, {__MODULE__, :coordinator, self(), make_ref()}}
+    pid = spawn(fn -> transient_coordinator_loop(mode) end)
+    :yes = :global.register_name(name, pid)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :kill)
+      :global.unregister_name(name)
+    end)
+
+    name
+  end
+
+  defp transient_coordinator_loop(:crash_on_get_or_create) do
+    receive do
+      {:"$gen_call", _from, {:get_or_create, _session_key, _create_fun}} ->
+        exit(:coordinator_restarting)
+    end
+  end
+
+  defp transient_coordinator_loop(:crash_on_invalidate) do
+    receive do
+      {:"$gen_call", from, {:get_or_create, _session_key, create_fun}} ->
+        GenServer.reply(from, {:ok, create_fun.()})
+        transient_coordinator_loop(:wait_invalidate)
+    end
+  end
+
+  defp transient_coordinator_loop(:wait_invalidate) do
+    receive do
+      {:"$gen_call", _from, {:invalidate_by_session_key, _reason}} ->
+        exit(:coordinator_restarting)
+    end
   end
 
   test "有效 inbound event: bridge 成功并触发 final egress" do
@@ -318,5 +367,48 @@ defmodule Men.Gateway.DispatchServerTest do
     assert_receive {:egress_called, _, %ErrorMessage{}}
     assert_receive {:egress_called, _, %ErrorMessage{}}
     refute_receive {:bridge_called, _, _}
+  end
+
+  test "session coordinator 在 get_or_create 调用窗口退出时回退到原始 session_key" do
+    coordinator_name = start_transient_coordinator(:crash_on_get_or_create)
+
+    server =
+      start_dispatch_server(
+        session_coordinator_enabled: true,
+        session_coordinator_name: coordinator_name
+      )
+
+    event = %{
+      request_id: "req-coord-race-1",
+      payload: "hello",
+      channel: "feishu",
+      user_id: "u-race-1"
+    }
+
+    assert {:ok, result} = DispatchServer.dispatch(server, event)
+    assert result.session_key == "feishu:u-race-1"
+    assert_receive {:bridge_called, "hello", %{session_key: "feishu:u-race-1"}}
+  end
+
+  test "session coordinator 在 invalidate 调用窗口退出时不影响错误返回" do
+    coordinator_name = start_transient_coordinator(:crash_on_invalidate)
+
+    server =
+      start_dispatch_server(
+        session_coordinator_enabled: true,
+        session_coordinator_name: coordinator_name
+      )
+
+    event = %{
+      request_id: "req-coord-race-2",
+      payload: "runtime_session_not_found",
+      channel: "feishu",
+      user_id: "u-race-2"
+    }
+
+    assert {:error, error_result} = DispatchServer.dispatch(server, event)
+    assert error_result.code == "runtime_session_not_found"
+    assert error_result.reason == "runtime session missing"
+    assert_receive {:egress_called, "feishu:u-race-2", %ErrorMessage{code: "runtime_session_not_found"}}
   end
 end

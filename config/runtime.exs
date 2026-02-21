@@ -26,12 +26,61 @@ parse_positive_integer_env = fn env_name, default ->
   end
 end
 
+parse_boolean_env = fn env_name, default ->
+  case System.get_env(env_name) do
+    nil ->
+      default
+
+    value when value in ["1", "true", "TRUE", "yes", "YES", "on", "ON"] ->
+      true
+
+    value when value in ["0", "false", "FALSE", "no", "NO", "off", "OFF"] ->
+      false
+
+    _ ->
+      default
+  end
+end
+
+parse_invalidation_codes_env = fn env_name, default ->
+  case System.get_env(env_name) do
+    nil ->
+      default
+
+    value ->
+      parsed =
+        value
+        |> String.split(",", trim: true)
+        |> Enum.map(&String.trim/1)
+        |> Enum.map(&String.downcase/1)
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.map(fn
+          "runtime_session_not_found" -> :runtime_session_not_found
+          code -> code
+        end)
+
+      if parsed == [], do: default, else: parsed
+  end
+end
+
 config :men, :runtime_bridge,
   # 支持仅通过配置切换 bridge 实现，不做运行时动态开关。
   bridge_impl: runtime_bridge_impl,
   timeout_ms: parse_positive_integer_env.("RUNTIME_BRIDGE_TIMEOUT_MS", 30_000),
   max_concurrency: parse_positive_integer_env.("RUNTIME_BRIDGE_MAX_CONCURRENCY", 10),
   backpressure_strategy: :reject
+
+config :men, Men.Gateway.SessionCoordinator,
+  enabled: parse_boolean_env.("GATEWAY_SESSION_COORDINATOR_ENABLED", true),
+  ttl_ms: parse_positive_integer_env.("GATEWAY_SESSION_COORDINATOR_TTL_MS", 300_000),
+  gc_interval_ms:
+    parse_positive_integer_env.("GATEWAY_SESSION_COORDINATOR_GC_INTERVAL_MS", 60_000),
+  max_entries: parse_positive_integer_env.("GATEWAY_SESSION_COORDINATOR_MAX_ENTRIES", 10_000),
+  invalidation_codes:
+    parse_invalidation_codes_env.(
+      "GATEWAY_SESSION_COORDINATOR_INVALIDATION_CODES",
+      [:runtime_session_not_found]
+    )
 
 # 钉钉机器人回发配置（生产可直接由环境变量驱动）。
 dingtalk_webhook_url = System.get_env("DINGTALK_ROBOT_WEBHOOK_URL")

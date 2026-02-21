@@ -6,6 +6,7 @@ defmodule Men.Gateway.DispatchServer do
   use GenServer
 
   alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
+  alias Men.Gateway.SessionCoordinator
   alias Men.Gateway.Types
   alias Men.Routing.SessionKey
 
@@ -13,6 +14,8 @@ defmodule Men.Gateway.DispatchServer do
           bridge_adapter: module(),
           egress_adapter: module(),
           storage_adapter: term(),
+          session_coordinator_enabled: boolean(),
+          session_coordinator_name: GenServer.server(),
           processed_run_ids: MapSet.t(binary()),
           session_last_context: %{optional(binary()) => Types.run_context()}
         }
@@ -56,12 +59,17 @@ defmodule Men.Gateway.DispatchServer do
   @impl true
   def init(opts) do
     config = Application.get_env(:men, __MODULE__, [])
+    coordinator_config = Application.get_env(:men, SessionCoordinator, [])
 
     state = %{
       bridge_adapter: Keyword.get(opts, :bridge_adapter, Keyword.fetch!(config, :bridge_adapter)),
       egress_adapter: Keyword.get(opts, :egress_adapter, Keyword.fetch!(config, :egress_adapter)),
       storage_adapter:
         Keyword.get(opts, :storage_adapter, Keyword.get(config, :storage_adapter, :memory)),
+      session_coordinator_enabled:
+        Keyword.get(opts, :session_coordinator_enabled, Keyword.get(coordinator_config, :enabled, true)),
+      session_coordinator_name:
+        Keyword.get(opts, :session_coordinator_name, SessionCoordinator),
       processed_run_ids: MapSet.new(),
       session_last_context: %{}
     }
@@ -214,9 +222,12 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   defp do_start_turn(state, context) do
+    runtime_session_id = resolve_runtime_session_id(state, context.session_key)
+
     bridge_context = %{
       request_id: context.request_id,
-      session_key: context.session_key,
+      session_key: runtime_session_id,
+      external_session_key: context.session_key,
       run_id: context.run_id
     }
 
@@ -226,6 +237,7 @@ defmodule Men.Gateway.DispatchServer do
           {:ok, payload}
 
         {:error, error_payload} ->
+          maybe_invalidate_runtime_session(state, context.session_key, runtime_session_id, error_payload)
           {:bridge_error, error_payload, context}
       end
     else
@@ -238,6 +250,67 @@ defmodule Men.Gateway.DispatchServer do
            details: %{reason: inspect(reason)}
          }, context}
     end
+  end
+
+  defp resolve_runtime_session_id(%{session_coordinator_enabled: false}, session_key), do: session_key
+
+  defp resolve_runtime_session_id(state, session_key) do
+    case safe_get_or_create_runtime_session_id(state.session_coordinator_name, session_key) do
+      {:ok, runtime_session_id} ->
+        runtime_session_id
+
+      {:error, _reason} ->
+        session_key
+    end
+  end
+
+  # coordinator 可能在调用窗口重启，捕获 exit 以保证 dispatch 可降级。
+  defp safe_get_or_create_runtime_session_id(coordinator_name, session_key) do
+    try do
+      SessionCoordinator.get_or_create(coordinator_name, session_key, &generate_runtime_session_id/0)
+    catch
+      :exit, _reason -> {:error, :session_coordinator_unavailable}
+    end
+  end
+
+  defp maybe_invalidate_runtime_session(%{session_coordinator_enabled: false}, _session_key, _runtime_session_id, _error_payload),
+    do: :ok
+
+  defp maybe_invalidate_runtime_session(state, session_key, runtime_session_id, error_payload) do
+    code =
+      error_payload
+      |> Map.get(:code)
+      |> normalize_error_code()
+
+    if code == "", do: :ok, else: invalidate_session_mapping(state, session_key, runtime_session_id, code)
+  end
+
+  defp invalidate_session_mapping(state, session_key, runtime_session_id, code) do
+    _ =
+      safe_invalidate_session_mapping(state.session_coordinator_name, %{
+        session_key: session_key,
+        runtime_session_id: runtime_session_id,
+        code: code
+      })
+
+    :ok
+  end
+
+  # 失效剔除属于尽力而为，coordinator 不可用时不影响主链路返回。
+  defp safe_invalidate_session_mapping(coordinator_name, reason) do
+    try do
+      SessionCoordinator.invalidate_by_session_key(coordinator_name, reason)
+    catch
+      :exit, _reason -> :ignored
+    end
+  end
+
+  defp normalize_error_code(code) when is_atom(code), do: code |> Atom.to_string() |> String.downcase()
+  defp normalize_error_code(code) when is_binary(code), do: code |> String.trim() |> String.downcase()
+  defp normalize_error_code(_), do: ""
+
+  defp generate_runtime_session_id do
+    "runtime-session-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
   end
 
   defp do_send_final(state, context, bridge_payload) do
