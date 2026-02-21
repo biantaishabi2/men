@@ -14,8 +14,8 @@ defmodule Men.Routing.SessionKey do
 
   @spec build(map()) :: {:ok, String.t()} | {:error, :invalid_segment | :missing_required_field}
   def build(%{channel: channel, user_id: user_id} = attrs) do
-    with :ok <- validate_segment(channel),
-         :ok <- validate_segment(user_id),
+    with :ok <- validate_required_segment(channel),
+         :ok <- validate_required_segment(user_id),
          :ok <- validate_optional_segment(Map.get(attrs, :group_id)),
          :ok <- validate_optional_segment(Map.get(attrs, :thread_id)) do
       key =
@@ -36,6 +36,10 @@ defmodule Men.Routing.SessionKey do
   defp append_optional(parts, tag, value) do
     parts ++ [tag, to_string(value)]
   end
+
+  defp validate_required_segment(nil), do: {:error, :missing_required_field}
+  defp validate_required_segment(""), do: {:error, :missing_required_field}
+  defp validate_required_segment(value), do: validate_segment(value)
 
   defp validate_optional_segment(nil), do: :ok
   defp validate_optional_segment(""), do: :ok

@@ -50,4 +50,16 @@ defmodule Men.Routing.SessionKeyTest do
 
     assert {:error, :missing_required_field} = SessionKey.build(attrs)
   end
+
+  test "必填字段为 nil 时返回缺失错误" do
+    attrs = %{channel: nil, user_id: nil}
+
+    assert {:error, :missing_required_field} = SessionKey.build(attrs)
+  end
+
+  test "必填字段为空字符串时返回缺失错误" do
+    attrs = %{channel: "", user_id: "user_123"}
+
+    assert {:error, :missing_required_field} = SessionKey.build(attrs)
+  end
 end

@@ -38,6 +38,8 @@ defmodule Men.Gateway.DispatchServerTest do
   end
 
   defmodule MockEgress do
+    import Kernel, except: [send: 2]
+
     @behaviour Men.Channels.Egress.Adapter
 
     @impl true
@@ -61,7 +63,7 @@ defmodule Men.Gateway.DispatchServerTest do
 
     defp notify(message) do
       if pid = Application.get_env(:men, :dispatch_server_test_pid) do
-        send(pid, message)
+        Kernel.send(pid, message)
       end
 
       :ok
@@ -107,7 +109,9 @@ defmodule Men.Gateway.DispatchServerTest do
     assert is_binary(result.run_id)
     assert result.session_key == "feishu:u100"
 
-    assert_receive {:bridge_called, "hello", %{request_id: "req-1", run_id: run_id, session_key: "feishu:u100"}}
+    assert_receive {:bridge_called, "hello",
+                    %{request_id: "req-1", run_id: run_id, session_key: "feishu:u100"}}
+
     assert run_id == result.run_id
 
     assert_receive {:egress_called, "feishu:u100", %FinalMessage{} = message}
@@ -262,7 +266,13 @@ defmodule Men.Gateway.DispatchServerTest do
     invalid_events = [
       %{request_id: "", payload: "hello", channel: "feishu", user_id: "u600"},
       %{request_id: 123, payload: "hello", channel: "feishu", user_id: "u600"},
-      %{request_id: "req-6-3", payload: "hello", metadata: "bad", channel: "feishu", user_id: "u600"},
+      %{
+        request_id: "req-6-3",
+        payload: "hello",
+        metadata: "bad",
+        channel: "feishu",
+        user_id: "u600"
+      },
       %{request_id: "req-6-4", payload: "hello"}
     ]
 
