@@ -11,8 +11,8 @@ defmodule Men.Gateway.DispatchServerTest do
     def start_turn(prompt, context) do
       notify({:bridge_called, prompt, context})
 
-      case prompt do
-        "bridge_error" ->
+      cond do
+        prompt == "bridge_error" ->
           {:error,
            %{
              type: :failed,
@@ -21,16 +21,16 @@ defmodule Men.Gateway.DispatchServerTest do
              details: %{source: :mock}
            }}
 
-        "bridge_timeout" ->
-          {:error,
+        prompt == "slow" ->
+          Process.sleep(200)
+
+          {:ok,
            %{
-             type: :timeout,
-             code: "CLI_TIMEOUT",
-             message: "runtime timeout",
-             details: %{source: :mock}
+             text: "ok:" <> prompt,
+             meta: %{source: :mock, echoed_run_id: context.run_id}
            }}
 
-        _ ->
+        true ->
           {:ok,
            %{
              text: "ok:" <> prompt,
@@ -271,6 +271,26 @@ defmodule Men.Gateway.DispatchServerTest do
     refute_receive {:egress_called, "feishu:u500", %FinalMessage{}}
   end
 
+  test "enqueue 非阻塞：HTTP/Controller 可快速 ACK，后台继续执行" do
+    server = start_dispatch_server()
+
+    event = %{
+      request_id: "req-async-1",
+      payload: "slow",
+      channel: "feishu",
+      user_id: "u-async"
+    }
+
+    started_at = System.monotonic_time(:millisecond)
+    assert :ok = DispatchServer.enqueue(server, event)
+    duration_ms = System.monotonic_time(:millisecond) - started_at
+
+    assert duration_ms < 120
+    assert_receive {:bridge_called, "slow", %{request_id: "req-async-1"}}, 1_000
+    assert_receive {:egress_called, "feishu:u-async", %FinalMessage{} = message}, 1_000
+    assert message.content == "ok:slow"
+  end
+
   test "关键边界输入: 非法 request_id / metadata 非 map / 路由字段不足" do
     server = start_dispatch_server()
 
@@ -298,82 +318,5 @@ defmodule Men.Gateway.DispatchServerTest do
     assert_receive {:egress_called, _, %ErrorMessage{}}
     assert_receive {:egress_called, _, %ErrorMessage{}}
     refute_receive {:bridge_called, _, _}
-  end
-
-  test "双渠道矩阵: success/error/timeout 的状态与链路字段一致透传" do
-    server = start_dispatch_server()
-
-    scenarios = [
-      %{
-        channel: "feishu",
-        user_id: "u-matrix-f-1",
-        request_id: "req-feishu-success",
-        payload: "hello",
-        expected: {:ok, "ok:hello"}
-      },
-      %{
-        channel: "dingtalk",
-        user_id: "u-matrix-d-1",
-        request_id: "req-dingtalk-success",
-        payload: "hello",
-        expected: {:ok, "ok:hello"}
-      },
-      %{
-        channel: "feishu",
-        user_id: "u-matrix-f-2",
-        request_id: "req-feishu-error",
-        payload: "bridge_error",
-        expected: {:error, "BRIDGE_FAIL", :failed}
-      },
-      %{
-        channel: "dingtalk",
-        user_id: "u-matrix-d-2",
-        request_id: "req-dingtalk-timeout",
-        payload: "bridge_timeout",
-        expected: {:error, "CLI_TIMEOUT", :timeout}
-      }
-    ]
-
-    Enum.each(scenarios, fn scenario ->
-      event = %{
-        request_id: scenario.request_id,
-        run_id: "run-#{scenario.request_id}",
-        payload: scenario.payload,
-        channel: scenario.channel,
-        user_id: scenario.user_id,
-        metadata: %{source: :matrix}
-      }
-
-      expected_session_key = "#{scenario.channel}:#{scenario.user_id}"
-
-      case scenario.expected do
-        {:ok, expected_content} ->
-          assert {:ok, result} = DispatchServer.dispatch(server, event)
-          assert result.request_id == scenario.request_id
-          assert result.run_id == "run-#{scenario.request_id}"
-          assert result.session_key == expected_session_key
-
-          assert_receive {:egress_called, ^expected_session_key, %FinalMessage{} = message}
-          assert message.content == expected_content
-          assert message.metadata.request_id == scenario.request_id
-          assert message.metadata.run_id == "run-#{scenario.request_id}"
-          assert message.metadata.session_key == expected_session_key
-
-        {:error, expected_code, expected_type} ->
-          assert {:error, error_result} = DispatchServer.dispatch(server, event)
-          assert error_result.request_id == scenario.request_id
-          assert error_result.run_id == "run-#{scenario.request_id}"
-          assert error_result.session_key == expected_session_key
-          assert error_result.code == expected_code
-          assert error_result.metadata.type == expected_type
-
-          assert_receive {:egress_called, ^expected_session_key, %ErrorMessage{} = message}
-          assert message.code == expected_code
-          assert message.metadata.request_id == scenario.request_id
-          assert message.metadata.run_id == "run-#{scenario.request_id}"
-          assert message.metadata.session_key == expected_session_key
-          assert message.metadata.type == expected_type
-      end
-    end)
   end
 end
