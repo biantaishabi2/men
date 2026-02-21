@@ -45,6 +45,12 @@ modules:
     path_rules:
       include:
         - lib/men/runtime_bridge/**
+    submodules:
+      - contracts
+      - gong_cli
+      - gong_rpc
+      - node_connector
+      - event_adapter
 
   - module_id: plugin_tool_extension
     display_name: Plugin Tool Extension
