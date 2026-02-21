@@ -100,7 +100,8 @@ defmodule Men.Gateway.DispatchServerTest do
       {DispatchServer,
        name: {:global, {__MODULE__, self(), make_ref()}},
        bridge_adapter: MockBridge,
-       egress_adapter: MockEgress}
+       egress_adapter: MockEgress,
+       session_coordinator_enabled: false}
     )
   end
 
