@@ -38,14 +38,7 @@ defmodule Men.Channels.Ingress.FeishuAdapter do
       ensure_table!()
       cleanup_expired(now)
 
-      case :ets.lookup(@table, nonce_key) do
-        [{^nonce_key, expires_at}] when expires_at > now ->
-          true
-
-        _ ->
-          :ets.insert(@table, {nonce_key, now + ttl_sec})
-          false
-      end
+      not :ets.insert_new(@table, {nonce_key, now + ttl_sec})
     end
 
     defp ensure_table! do
@@ -63,7 +56,7 @@ defmodule Men.Channels.Ingress.FeishuAdapter do
     end
 
     defp cleanup_expired(now) do
-      :ets.select_delete(@table, [{{:"$1", :"$2"}, [{:<, :"$2", now}], [true]}])
+      :ets.select_delete(@table, [{{:"$1", :"$2"}, [{:"=<", :"$2", now}], [true]}])
       :ok
     end
   end
@@ -72,8 +65,8 @@ defmodule Men.Channels.Ingress.FeishuAdapter do
   def normalize(%{headers: headers, body: body}) when is_map(headers) and is_binary(body) do
     with {:ok, payload} <- decode_body(body),
          {:ok, bot_id} <- resolve_bot_id(payload),
-         config <- config_for_bot(bot_id),
-         :ok <- validate_signature(headers, body, config),
+         {:ok, config} <- config_for_bot(bot_id),
+         :ok <- validate_signature(headers, body, bot_id, config),
          {:ok, event} <- to_inbound_event(payload, bot_id, config) do
       {:ok, event}
     end
@@ -98,14 +91,14 @@ defmodule Men.Channels.Ingress.FeishuAdapter do
     end
   end
 
-  defp validate_signature(headers, body, config) do
+  defp validate_signature(headers, body, bot_id, config) do
     with {:ok, timestamp} <- fetch_header(headers, "x-lark-request-timestamp", :missing_timestamp),
          {:ok, nonce} <- fetch_header(headers, "x-lark-nonce", :missing_nonce),
          {:ok, signature} <- fetch_header(headers, "x-lark-signature", :missing_signature),
          {:ok, timestamp_int} <- parse_timestamp(timestamp),
          :ok <- verify_timestamp(timestamp_int, config),
          :ok <- verify_signature(timestamp, nonce, body, signature, config),
-         :ok <- verify_replay(timestamp, nonce, config) do
+         :ok <- verify_replay(timestamp, nonce, bot_id, config) do
       :ok
     end
   end
@@ -142,11 +135,11 @@ defmodule Men.Channels.Ingress.FeishuAdapter do
     if Plug.Crypto.secure_compare(expected, signature), do: :ok, else: {:error, :invalid_signature}
   end
 
-  defp verify_replay(_timestamp, _nonce, %{sign_mode: :compat}), do: :ok
+  defp verify_replay(_timestamp, _nonce, _bot_id, %{sign_mode: :compat}), do: :ok
 
-  defp verify_replay(timestamp, nonce, config) do
+  defp verify_replay(timestamp, nonce, bot_id, config) do
     backend = Map.fetch!(config, :replay_backend)
-    key = timestamp <> ":" <> nonce
+    key = bot_id <> ":" <> timestamp <> ":" <> nonce
     ttl_sec = Map.fetch!(config, :time_window_sec)
     if backend.seen_nonce?(key, ttl_sec), do: {:error, :replay_detected}, else: :ok
   end
@@ -244,16 +237,27 @@ defmodule Men.Channels.Ingress.FeishuAdapter do
       |> normalize_keyword_map()
 
     merged = Map.merge(base, bot_override)
-    sign_mode = Map.fetch!(merged, :sign_mode)
+    sign_mode = normalize_sign_mode(Map.get(merged, :sign_mode, :strict))
 
-    Map.merge(merged, %{time_window_sec: resolve_time_window(sign_mode, merged[:time_window_sec])})
+    case Map.get(merged, :signing_secret) do
+      secret when is_binary(secret) and secret != "" ->
+        {:ok,
+         Map.merge(merged, %{
+           sign_mode: sign_mode,
+           replay_backend: Map.get(merged, :replay_backend, ReplayBackend.ETS),
+           time_window_sec: resolve_time_window(sign_mode, merged[:time_window_sec])
+         })}
+
+      _ ->
+        {:error, :missing_signing_secret}
+    end
   end
 
   defp base_config(app_config) do
     sign_mode = normalize_sign_mode(Keyword.get(app_config, :sign_mode, :strict))
 
     %{
-      signing_secret: Keyword.fetch!(app_config, :signing_secret),
+      signing_secret: Keyword.get(app_config, :signing_secret),
       sign_mode: sign_mode,
       replay_backend: Keyword.get(app_config, :replay_backend, ReplayBackend.ETS),
       time_window_sec: resolve_time_window(sign_mode, Keyword.get(app_config, :time_window_sec))
