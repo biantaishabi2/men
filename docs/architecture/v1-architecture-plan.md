@@ -46,7 +46,9 @@
 
 4. `agent_runtime_bridge`
 - `contracts`
-- `gong_cli`
+- `gong_cli` (V1: Port 子进程模式，向后兼容)
+- `gong_rpc` (V2: Erlang 分布式 RPC，常驻节点模式)
+- `node_connector` (节点连接管理、自动重连)
 - `event_adapter`
 
 5. `foundation_infra`
@@ -65,19 +67,30 @@
 - owns rendering + delivery for each channel
 
 3. `agent_runtime_bridge` implements `RuntimeBridge`
-- owns all calls to `gong` (CLI now, RPC later)
+- owns all calls to `gong` (CLI or distributed RPC, configurable)
+- V1: `gong_cli` — Port 子进程模式（每次请求启动新 BEAM VM）
+- V2: `gong_rpc` — Erlang 分布式节点 RPC（Gong 作为常驻 BEAM 节点，:rpc.call 直接调用）
 - other modules must not import `gong` internals directly
 
 ## Integration Contract with Gong
 
-V1 contract (minimum):
+V1 contract (CLI mode):
 1. create or resolve session key
-2. send prompt to `gong`
-3. stream events back to egress
+2. send prompt to `gong` via Port.open
+3. collect stdout as response
 4. persist status and correlation ids
+
+V2 contract (distributed RPC mode):
+1. Node.connect to gong node (auto-reconnect via node_connector)
+2. :rpc.call Gong.SessionManager.create_session → get session pid
+3. :rpc.call Gong.Session.prompt → submit prompt
+4. Gong.Session.subscribe → receive {:session_event, event} asynchronously
+5. stream events back to egress in real-time
+6. :rpc.call Gong.Session.close → cleanup
 
 Contract rule:
 - `men` only calls bridge contract (`agent_runtime_bridge`), never imports `gong` internals.
+- bridge adapter is configurable: GongCLI (V1) or GongRPC (V2), switch via config.
 
 ## Why OTP First (architecture rationale)
 
