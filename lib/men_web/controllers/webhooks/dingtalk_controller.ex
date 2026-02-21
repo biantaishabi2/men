@@ -13,7 +13,7 @@ defmodule MenWeb.Webhooks.DingtalkController do
     request = %{
       headers: Map.new(conn.req_headers),
       body: params,
-      raw_body: conn.assigns[:raw_body] || conn.private[:raw_body]
+      raw_body: resolve_raw_body(conn, params)
     }
 
     ingress_adapter = Keyword.get(config(), :ingress_adapter, DingtalkIngress)
@@ -57,5 +57,13 @@ defmodule MenWeb.Webhooks.DingtalkController do
       code: "INGRESS_REJECTED",
       metadata: %{}
     }
+  end
+
+  # 测试/兼容场景下可能拿不到 parser 注入的 raw_body，这里兜底编码一次，
+  # 避免 ingress 因空 raw_body 直接拒绝。
+  defp resolve_raw_body(conn, params) do
+    conn.assigns[:raw_body] ||
+      conn.private[:raw_body] ||
+      Jason.encode!(params)
   end
 end
