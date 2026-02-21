@@ -66,10 +66,11 @@ defmodule MenWeb.Webhooks.FeishuControllerTest do
 
   test "合法签名 webhook 返回 200 并进入 dispatch 主链路", %{conn: conn} do
     server = start_dispatch_server(BridgeOK)
+    test_pid = self()
 
     Application.put_env(:men, MenWeb.Webhooks.FeishuController,
       dispatch_fun: fn event ->
-        send(self(), {:dispatch_called, event})
+        send(test_pid, {:dispatch_called, event})
         DispatchServer.dispatch(server, event)
       end
     )
@@ -79,7 +80,7 @@ defmodule MenWeb.Webhooks.FeishuControllerTest do
     conn = post(conn, "/webhooks/feishu", body)
 
     assert json_response(conn, 200)["status"] == "accepted"
-    assert_receive {:dispatch_called, event}
+    assert_receive {:dispatch_called, event}, 1_000
     assert event.request_id == "evt-feishu-happy-path"
     assert event.run_id == "evt-feishu-happy-path"
     assert event.channel == "feishu"
@@ -110,10 +111,11 @@ defmodule MenWeb.Webhooks.FeishuControllerTest do
 
   test "bridge 失败时 webhook 仍返回 200 并触发 error_reply", %{conn: conn} do
     server = start_dispatch_server(BridgeFail)
+    test_pid = self()
 
     Application.put_env(:men, MenWeb.Webhooks.FeishuController,
       dispatch_fun: fn event ->
-        send(self(), {:dispatch_called, event})
+        send(test_pid, {:dispatch_called, event})
         DispatchServer.dispatch(server, event)
       end
     )
@@ -123,7 +125,7 @@ defmodule MenWeb.Webhooks.FeishuControllerTest do
     conn = post(conn, "/webhooks/feishu", body)
 
     assert json_response(conn, 200)["status"] == "accepted"
-    assert_receive {:dispatch_called, event}
+    assert_receive {:dispatch_called, event}, 1_000
     assert event.request_id == "evt-feishu-bridge-fail"
     assert event.run_id == "evt-feishu-bridge-fail"
     assert event.channel == "feishu"
