@@ -44,7 +44,6 @@ jobs:
       workflow_source_repo: biantaishabi2/Cli
       workflow_source_ref: master
       issue_number: ${{ format('{0}', github.event.issue.number) }}
-      build_niuma: false
     secrets: inherit
 
   # issue_comment.created → 非 bot 用户在非 PR 的 issue 上评论
@@ -61,7 +60,6 @@ jobs:
       workflow_source_repo: biantaishabi2/Cli
       workflow_source_ref: master
       issue_number: ${{ format('{0}', github.event.issue.number) }}
-      build_niuma: false
     secrets: inherit
 
   # workflow_dispatch → 手动触发
@@ -76,5 +74,4 @@ jobs:
       max_discussion_rounds: ${{ inputs.max_discussion_rounds }}
       visible_round_interval: ${{ inputs.visible_round_interval }}
       visible_only_on_diff: ${{ inputs.visible_only_on_diff }}
-      build_niuma: false
     secrets: inherit
