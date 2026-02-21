@@ -20,17 +20,47 @@ defmodule MenWeb.Webhooks.DingtalkController do
     dispatch_server = Keyword.get(config(), :dispatch_server, DispatchServer)
     egress_adapter = Keyword.get(config(), :egress_adapter, DingtalkEgress)
 
-    dispatch_result =
-      case ingress_adapter.normalize(request) do
-        {:ok, inbound_event} -> DispatchServer.dispatch(dispatch_server, inbound_event)
-        {:error, ingress_error} -> {:error, ingress_error_to_dispatch_error(ingress_error)}
-      end
+    case ingress_adapter.normalize(request) do
+      {:ok, inbound_event} ->
+        case DispatchServer.enqueue(dispatch_server, inbound_event) do
+          :ok ->
+            conn
+            |> put_status(:ok)
+            |> json(%{
+              status: "accepted",
+              code: "ACCEPTED",
+              request_id: Map.get(inbound_event, :request_id)
+            })
 
-    {status, body} = egress_adapter.to_webhook_response(dispatch_result)
+          {:error, :dispatch_server_unavailable} ->
+            {status, body} =
+              egress_adapter.to_webhook_response(
+                {:error,
+                 %{
+                   session_key: "dingtalk:unknown",
+                   run_id: "unknown_run",
+                   request_id: Map.get(inbound_event, :request_id, "unknown_request"),
+                   reason: "dispatch server unavailable",
+                   code: "DISPATCH_UNAVAILABLE",
+                   metadata: %{}
+                 }}
+              )
 
-    conn
-    |> put_status(status)
-    |> json(body)
+            conn
+            |> put_status(status)
+            |> json(body)
+        end
+
+      {:error, ingress_error} ->
+        {status, body} =
+          egress_adapter.to_webhook_response(
+            {:error, ingress_error_to_dispatch_error(ingress_error)}
+          )
+
+        conn
+        |> put_status(status)
+        |> json(body)
+    end
   end
 
   defp config do

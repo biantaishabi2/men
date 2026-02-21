@@ -11,20 +11,31 @@ defmodule Men.Gateway.DispatchServerTest do
     def start_turn(prompt, context) do
       notify({:bridge_called, prompt, context})
 
-      if prompt == "bridge_error" do
-        {:error,
-         %{
-           type: :failed,
-           code: "BRIDGE_FAIL",
-           message: "runtime bridge failed",
-           details: %{source: :mock}
-         }}
-      else
-        {:ok,
-         %{
-           text: "ok:" <> prompt,
-           meta: %{source: :mock, echoed_run_id: context.run_id}
-         }}
+      cond do
+        prompt == "bridge_error" ->
+          {:error,
+           %{
+             type: :failed,
+             code: "BRIDGE_FAIL",
+             message: "runtime bridge failed",
+             details: %{source: :mock}
+           }}
+
+        prompt == "slow" ->
+          Process.sleep(200)
+
+          {:ok,
+           %{
+             text: "ok:" <> prompt,
+             meta: %{source: :mock, echoed_run_id: context.run_id}
+           }}
+
+        true ->
+          {:ok,
+           %{
+             text: "ok:" <> prompt,
+             meta: %{source: :mock, echoed_run_id: context.run_id}
+           }}
       end
     end
 
@@ -258,6 +269,26 @@ defmodule Men.Gateway.DispatchServerTest do
 
     assert_receive {:egress_called, "feishu:u500", %FinalMessage{}}
     refute_receive {:egress_called, "feishu:u500", %FinalMessage{}}
+  end
+
+  test "enqueue 非阻塞：HTTP/Controller 可快速 ACK，后台继续执行" do
+    server = start_dispatch_server()
+
+    event = %{
+      request_id: "req-async-1",
+      payload: "slow",
+      channel: "feishu",
+      user_id: "u-async"
+    }
+
+    started_at = System.monotonic_time(:millisecond)
+    assert :ok = DispatchServer.enqueue(server, event)
+    duration_ms = System.monotonic_time(:millisecond) - started_at
+
+    assert duration_ms < 120
+    assert_receive {:bridge_called, "slow", %{request_id: "req-async-1"}}, 1_000
+    assert_receive {:egress_called, "feishu:u-async", %FinalMessage{} = message}, 1_000
+    assert message.content == "ok:slow"
   end
 
   test "关键边界输入: 非法 request_id / metadata 非 map / 路由字段不足" do
