@@ -24,6 +24,7 @@ defmodule MenWeb.Router do
     pipe_through :api
 
     post "/feishu", FeishuController, :create
+    post "/dingtalk", DingtalkController, :callback
   end
 
   # Other scopes may use custom stacks.

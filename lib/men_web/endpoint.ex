@@ -41,7 +41,7 @@ defmodule MenWeb.Endpoint do
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],
     json_decoder: Phoenix.json_library(),
-    body_reader: {MenWeb.Plugs.RawBodyReader, :read_body, []}
+    body_reader: {MenWeb.CacheBodyReader, :read_body, []}
 
   plug Plug.MethodOverride
   plug Plug.Head
