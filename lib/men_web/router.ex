@@ -20,6 +20,12 @@ defmodule MenWeb.Router do
     get "/", PageController, :home
   end
 
+  scope "/webhooks", MenWeb.Webhooks do
+    pipe_through :api
+
+    post "/dingtalk", DingtalkController, :callback
+  end
+
   # Other scopes may use custom stacks.
   # scope "/api", MenWeb do
   #   pipe_through :api
