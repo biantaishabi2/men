@@ -95,9 +95,16 @@ defmodule Men.RuntimeBridge.Bridge do
         adapter.start_turn(prompt_text, context_map)
 
       true ->
-        context_to_request(prompt_text, context_map, opts)
-        |> prompt(opts)
-        |> to_legacy_start_turn_result(prompt_text, context_map)
+        {:error,
+         %{
+           type: :failed,
+           code: "unsupported_operation",
+           message: "adapter does not implement start_turn/2",
+           run_id: Map.get(context_map, :run_id),
+           request_id: Map.get(context_map, :request_id),
+           session_key: Map.get(context_map, :session_key),
+           details: %{adapter: inspect(adapter), action: :start_turn}
+         }}
     end
   end
 

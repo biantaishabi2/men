@@ -97,6 +97,24 @@ defmodule Men.RuntimeBridge.BridgeTest do
     end
   end
 
+  defmodule PromptOnlyBridge do
+    @behaviour Men.RuntimeBridge.Bridge
+
+    @impl true
+    def prompt(%Request{} = request, _opts) do
+      notify({:prompt_only_called, request})
+      {:ok, %Response{runtime_id: request.runtime_id, session_id: request.session_id, payload: "prompt-only", metadata: %{source: :prompt_only}}}
+    end
+
+    defp notify(message) do
+      if pid = Application.get_env(:men, :runtime_bridge_test_pid) do
+        send(pid, message)
+      end
+
+      :ok
+    end
+  end
+
   setup do
     original_runtime_bridge = Application.get_env(:men, :runtime_bridge, [])
     Application.put_env(:men, :runtime_bridge_test_pid, self())
@@ -219,6 +237,15 @@ defmodule Men.RuntimeBridge.BridgeTest do
     assert error_response.code == "unsupported_operation"
     assert error_response.reason == "adapter does not implement call/2"
     refute_receive {:start_turn_only_called, _, _}
+  end
+
+  test "deprecated start_turn 在 flag 关闭且 adapter 无 start_turn/2 时不走新路径 fallback" do
+    assert {:error, error_payload} =
+             Bridge.start_turn("hello", %{session_key: "sess-no-legacy"}, adapter: PromptOnlyBridge, bridge_v1_enabled: false)
+
+    assert error_payload.code == "unsupported_operation"
+    assert error_payload.message == "adapter does not implement start_turn/2"
+    refute_receive {:prompt_only_called, _}
   end
 
   test "legacy start_turn 字符串错误码会安全降级，避免动态 atom" do
