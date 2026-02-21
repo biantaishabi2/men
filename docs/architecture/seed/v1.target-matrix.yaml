@@ -41,6 +41,20 @@ allow_edges:
     callee: external_dependencies
     rationale: process and transport adapters only
 
+  # === agent_runtime_bridge 子模块级别边 ===
+  - caller: bridge_gong_cli
+    callee: bridge_contracts
+    rationale: GongCLI 实现 Bridge behaviour
+  - caller: bridge_gong_rpc
+    callee: bridge_contracts
+    rationale: GongRPC 实现 Bridge behaviour
+  - caller: bridge_gong_rpc
+    callee: bridge_node_connector
+    rationale: GongRPC 依赖 node_connector 管理 Gong 节点连接
+  - caller: bridge_node_connector
+    callee: foundation_infra
+    rationale: node_connector 使用 config 获取节点名/cookie
+
   - caller: plugin_tool_extension
     callee: gateway_control_plane
     rationale: plugin actions bind gateway session context

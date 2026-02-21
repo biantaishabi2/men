@@ -45,12 +45,49 @@ modules:
     path_rules:
       include:
         - lib/men/runtime_bridge/**
-    submodules:
-      - contracts
-      - gong_cli
-      - gong_rpc
-      - node_connector
-      - event_adapter
+
+  # agent_runtime_bridge 子模块
+  - module_id: bridge_contracts
+    display_name: Bridge 契约定义
+    domain_kind: business
+    layer: application
+    precedence: 41
+    parent: agent_runtime_bridge
+    path_rules:
+      include:
+        - lib/men/runtime_bridge/bridge.ex
+        - lib/men/runtime_bridge/request.ex
+        - lib/men/runtime_bridge/response.ex
+
+  - module_id: bridge_gong_cli
+    display_name: GongCLI 适配器（Port 子进程）
+    domain_kind: business
+    layer: application
+    precedence: 42
+    parent: agent_runtime_bridge
+    path_rules:
+      include:
+        - lib/men/runtime_bridge/gong_cli.ex
+
+  - module_id: bridge_gong_rpc
+    display_name: GongRPC 适配器（分布式 Erlang RPC）
+    domain_kind: business
+    layer: application
+    precedence: 43
+    parent: agent_runtime_bridge
+    path_rules:
+      include:
+        - lib/men/runtime_bridge/gong_rpc.ex
+
+  - module_id: bridge_node_connector
+    display_name: 节点连接管理（自动重连）
+    domain_kind: business
+    layer: application
+    precedence: 44
+    parent: agent_runtime_bridge
+    path_rules:
+      include:
+        - lib/men/runtime_bridge/node_connector.ex
 
   - module_id: plugin_tool_extension
     display_name: Plugin Tool Extension
