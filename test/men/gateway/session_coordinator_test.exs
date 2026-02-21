@@ -96,6 +96,30 @@ defmodule Men.Gateway.SessionCoordinatorTest do
     assert {:ok, "runtime-2"} = SessionCoordinator.get_or_create(name, "session-A", create_fun)
   end
 
+  test "GC 定时清理过期映射" do
+    {name, pid} = start_coordinator(ttl_ms: 30, gc_interval_ms: 10_000)
+    counter = :atomics.new(1, [])
+
+    create_fun = fn ->
+      id = :atomics.add_get(counter, 1, 1)
+      "runtime-" <> Integer.to_string(id)
+    end
+
+    assert {:ok, "runtime-1"} = SessionCoordinator.get_or_create(name, "session-A", create_fun)
+    Process.sleep(40)
+
+    send(pid, :gc)
+    Process.sleep(20)
+
+    assert :not_found =
+             SessionCoordinator.invalidate_by_runtime_session_id(name, %{
+               runtime_session_id: "runtime-1",
+               code: :runtime_session_not_found
+             })
+
+    assert {:ok, "runtime-2"} = SessionCoordinator.get_or_create(name, "session-A", create_fun)
+  end
+
   test "显式失效剔除后下次重新创建" do
     {name, _pid} = start_coordinator()
     counter = :atomics.new(1, [])
