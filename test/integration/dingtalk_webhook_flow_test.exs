@@ -21,10 +21,18 @@ defmodule Men.Integration.DingtalkWebhookFlowTest do
   end
 
   defmodule MockDispatchEgress do
+    import Kernel, except: [send: 2]
+
     @behaviour Men.Channels.Egress.Adapter
 
     @impl true
-    def send(_target, _message), do: :ok
+    def send(target, message) do
+      if pid = Application.get_env(:men, :dingtalk_integration_test_pid) do
+        Kernel.send(pid, {:egress_called, target, message})
+      end
+
+      :ok
+    end
   end
 
   setup do
@@ -34,9 +42,7 @@ defmodule Men.Integration.DingtalkWebhookFlowTest do
 
     start_supervised!(
       {DispatchServer,
-       name: server_name,
-       bridge_adapter: MockBridge,
-       egress_adapter: MockDispatchEgress}
+       name: server_name, bridge_adapter: MockBridge, egress_adapter: MockDispatchEgress}
     )
 
     Application.put_env(:men, MenWeb.Webhooks.DingtalkController,
@@ -58,7 +64,7 @@ defmodule Men.Integration.DingtalkWebhookFlowTest do
     :ok
   end
 
-  test "钉钉 webhook 进入 dispatch 主链路并返回 final 回写", %{conn: conn} do
+  test "钉钉 webhook 进入主链路后立即 ACK，并在后台完成处理", %{conn: conn} do
     payload = %{
       "event_type" => "message",
       "event_id" => "evt-integration-1",
@@ -71,7 +77,12 @@ defmodule Men.Integration.DingtalkWebhookFlowTest do
     raw_body = Jason.encode!(payload)
 
     signature =
-      :crypto.mac(:hmac, :sha256, "integration-secret", Integer.to_string(timestamp) <> "\n" <> raw_body)
+      :crypto.mac(
+        :hmac,
+        :sha256,
+        "integration-secret",
+        Integer.to_string(timestamp) <> "\n" <> raw_body
+      )
       |> Base.encode64()
 
     conn =
@@ -81,14 +92,14 @@ defmodule Men.Integration.DingtalkWebhookFlowTest do
       |> post("/webhooks/dingtalk", payload)
 
     body = json_response(conn, 200)
-
-    assert body["status"] == "final"
-    assert body["code"] == "OK"
-    assert body["message"] == "bridge-final"
+    assert body["status"] == "accepted"
+    assert body["code"] == "ACCEPTED"
     assert body["request_id"] == "evt-integration-1"
-    assert is_binary(body["run_id"])
 
     assert_receive {:bridge_called, prompt, _context}
+
+    assert_receive {:egress_called, "dingtalk:user-integration",
+                    %Men.Channels.Egress.Messages.FinalMessage{}}
 
     assert Jason.decode!(prompt) == %{
              "channel" => "dingtalk",

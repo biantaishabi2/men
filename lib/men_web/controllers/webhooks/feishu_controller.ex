@@ -14,8 +14,8 @@ defmodule MenWeb.Webhooks.FeishuController do
 
     case FeishuAdapter.normalize(request) do
       {:ok, inbound_event} ->
-        _ = dispatch(inbound_event)
-        json(conn, %{status: "accepted"})
+        _ = enqueue(inbound_event)
+        json(conn, %{status: "accepted", code: "ACCEPTED", request_id: inbound_event.request_id})
 
       {:error, reason} ->
         if FeishuAdapter.unauthorized_reason?(reason) do
@@ -30,16 +30,18 @@ defmodule MenWeb.Webhooks.FeishuController do
     end
   end
 
-  defp dispatch(inbound_event) do
+  defp enqueue(inbound_event) do
     config = Application.get_env(:men, __MODULE__, [])
 
     case Keyword.get(config, :dispatch_fun) do
       fun when is_function(fun, 1) ->
-        fun.(inbound_event)
+        # 测试注入函数与默认路径统一走异步投递语义。
+        Task.start(fn -> fun.(inbound_event) end)
+        :ok
 
       _ ->
         dispatch_server = Keyword.get(config, :dispatch_server, DispatchServer)
-        dispatch_server.dispatch(inbound_event)
+        dispatch_server.enqueue(inbound_event)
     end
   end
 

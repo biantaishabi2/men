@@ -40,6 +40,19 @@ defmodule Men.Gateway.DispatchServer do
     GenServer.call(server, {:dispatch, inbound_event})
   end
 
+  @spec enqueue(GenServer.server(), Types.inbound_event()) ::
+          :ok | {:error, :dispatch_server_unavailable}
+  def enqueue(server \\ __MODULE__, inbound_event) do
+    case GenServer.whereis(server) do
+      nil ->
+        {:error, :dispatch_server_unavailable}
+
+      _pid ->
+        GenServer.cast(server, {:enqueue, inbound_event})
+        :ok
+    end
+  end
+
   @impl true
   def init(opts) do
     config = Application.get_env(:men, __MODULE__, [])
@@ -47,7 +60,8 @@ defmodule Men.Gateway.DispatchServer do
     state = %{
       bridge_adapter: Keyword.get(opts, :bridge_adapter, Keyword.fetch!(config, :bridge_adapter)),
       egress_adapter: Keyword.get(opts, :egress_adapter, Keyword.fetch!(config, :egress_adapter)),
-      storage_adapter: Keyword.get(opts, :storage_adapter, Keyword.get(config, :storage_adapter, :memory)),
+      storage_adapter:
+        Keyword.get(opts, :storage_adapter, Keyword.get(config, :storage_adapter, :memory)),
       processed_run_ids: MapSet.new(),
       session_last_context: %{}
     }
@@ -57,21 +71,32 @@ defmodule Men.Gateway.DispatchServer do
 
   @impl true
   def handle_call({:dispatch, inbound_event}, _from, state) do
+    {reply, new_state} = run_dispatch(state, inbound_event)
+    {:reply, reply, new_state}
+  end
+
+  @impl true
+  def handle_cast({:enqueue, inbound_event}, state) do
+    {_reply, new_state} = run_dispatch(state, inbound_event)
+    {:noreply, new_state}
+  end
+
+  defp run_dispatch(state, inbound_event) do
     with {:ok, context} <- normalize_event(inbound_event),
          :ok <- ensure_not_duplicate(context.run_id, state),
          {:ok, bridge_payload} <- do_start_turn(state, context),
          :ok <- do_send_final(state, context, bridge_payload) do
       new_state = mark_processed(state, context)
-      {:reply, {:ok, build_dispatch_result(context, bridge_payload)}, new_state}
+      {{:ok, build_dispatch_result(context, bridge_payload)}, new_state}
     else
       {:duplicate, run_id} ->
         _ = run_id
-        {:reply, {:ok, :duplicate}, state}
+        {{:ok, :duplicate}, state}
 
       {:bridge_error, error_payload, context} ->
         error_payload = ensure_error_egress_result(state, context, error_payload)
         new_state = maybe_mark_processed(state, context, error_payload)
-        {:reply, {:error, build_error_result(context, error_payload)}, new_state}
+        {{:error, build_error_result(context, error_payload)}, new_state}
 
       {:egress_error, reason, context} ->
         error_payload = %{
@@ -83,7 +108,7 @@ defmodule Men.Gateway.DispatchServer do
 
         error_payload = ensure_error_egress_result(state, context, error_payload)
         new_state = maybe_mark_processed(state, context, error_payload)
-        {:reply, {:error, build_error_result(context, error_payload)}, new_state}
+        {{:error, build_error_result(context, error_payload)}, new_state}
 
       {:error, reason} ->
         synthetic_context = fallback_context(inbound_event)
@@ -96,7 +121,7 @@ defmodule Men.Gateway.DispatchServer do
         }
 
         error_payload = ensure_error_egress_result(state, synthetic_context, error_payload)
-        {:reply, {:error, build_error_result(synthetic_context, error_payload)}, state}
+        {{:error, build_error_result(synthetic_context, error_payload)}, state}
     end
   end
 
@@ -135,8 +160,9 @@ defmodule Men.Gateway.DispatchServer do
 
   defp normalize_event(_), do: {:error, :invalid_event}
 
-  defp resolve_session_key(%{session_key: session_key}) when is_binary(session_key) and session_key != "",
-    do: {:ok, session_key}
+  defp resolve_session_key(%{session_key: session_key})
+       when is_binary(session_key) and session_key != "",
+       do: {:ok, session_key}
 
   defp resolve_session_key(attrs) do
     SessionKey.build(%{
@@ -147,7 +173,9 @@ defmodule Men.Gateway.DispatchServer do
     })
   end
 
-  defp resolve_run_id(%{run_id: run_id}) when is_binary(run_id) and run_id != "", do: {:ok, run_id}
+  defp resolve_run_id(%{run_id: run_id}) when is_binary(run_id) and run_id != "",
+    do: {:ok, run_id}
+
   defp resolve_run_id(_), do: {:ok, generate_run_id()}
 
   defp generate_run_id do
@@ -162,7 +190,9 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   defp fetch_required_payload(attrs, key) do
-    if Map.has_key?(attrs, key), do: {:ok, Map.get(attrs, key)}, else: {:error, {:missing_field, key}}
+    if Map.has_key?(attrs, key),
+      do: {:ok, Map.get(attrs, key)},
+      else: {:error, {:missing_field, key}}
   end
 
   defp normalize_metadata(nil), do: {:ok, %{}}

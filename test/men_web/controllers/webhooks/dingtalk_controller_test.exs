@@ -25,6 +25,15 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
              user_id: "user-timeout"
            }}
 
+        "slow" ->
+          {:ok,
+           %{
+             request_id: "req-slow",
+             payload: %{channel: "dingtalk", content: "slow"},
+             channel: "dingtalk",
+             user_id: "user-slow"
+           }}
+
         _ ->
           {:ok,
            %{
@@ -52,8 +61,15 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
 
       timeout? =
         case Jason.decode(prompt) do
-          {:ok, %{"content" => "timeout"}} -> true
-          _ -> false
+          {:ok, %{"content" => "slow"}} ->
+            Process.sleep(200)
+            false
+
+          {:ok, %{"content" => "timeout"}} ->
+            true
+
+          _ ->
+            false
         end
 
       if timeout? do
@@ -90,9 +106,7 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
 
     start_supervised!(
       {DispatchServer,
-       name: server_name,
-       bridge_adapter: MockBridge,
-       egress_adapter: MockDispatchEgress}
+       name: server_name, bridge_adapter: MockBridge, egress_adapter: MockDispatchEgress}
     )
 
     Application.put_env(:men, MenWeb.Webhooks.DingtalkController,
@@ -108,15 +122,13 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
     :ok
   end
 
-  test "主流程编排：ingress -> dispatch -> final 回写", %{conn: conn} do
+  test "主流程编排：ingress -> enqueue，HTTP 立即 accepted", %{conn: conn} do
     conn = post(conn, "/webhooks/dingtalk", %{"mode" => "ok"})
 
     body = json_response(conn, 200)
-    assert body["status"] == "final"
-    assert body["code"] == "OK"
-    assert body["message"] == "ok-response"
+    assert body["status"] == "accepted"
+    assert body["code"] == "ACCEPTED"
     assert body["request_id"] == "req-ok"
-    assert is_binary(body["run_id"])
 
     assert_receive {:ingress_called, request}
     assert is_binary(request.raw_body)
@@ -142,13 +154,13 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
     refute_receive {:bridge_called, _, _}
   end
 
-  test "bridge timeout：HTTP200 + timeout body", %{conn: conn} do
+  test "bridge timeout：HTTP 仍立即 accepted，超时在后台处理", %{conn: conn} do
     conn = post(conn, "/webhooks/dingtalk", %{"mode" => "timeout"})
 
     body = json_response(conn, 200)
-    assert body["status"] == "timeout"
-    assert body["code"] == "CLI_TIMEOUT"
-    assert body["message"] == "runtime timeout"
+    assert body["status"] == "accepted"
+    assert body["code"] == "ACCEPTED"
+    assert body["request_id"] == "req-timeout"
 
     assert_receive {:ingress_called, _request}
 
@@ -156,7 +168,22 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
     assert Jason.decode!(prompt) == %{"channel" => "dingtalk", "content" => "timeout"}
   end
 
-  test "并发请求下 dispatch 与回写语义稳定" do
+  test "慢桥接不阻塞 webhook ACK" do
+    started_at = System.monotonic_time(:millisecond)
+    conn = Phoenix.ConnTest.build_conn() |> post("/webhooks/dingtalk", %{"mode" => "slow"})
+    duration_ms = System.monotonic_time(:millisecond) - started_at
+
+    body = json_response(conn, 200)
+    assert body["status"] == "accepted"
+    assert body["code"] == "ACCEPTED"
+    assert body["request_id"] == "req-slow"
+    assert duration_ms < 150
+
+    assert_receive {:bridge_called, prompt, _context}
+    assert Jason.decode!(prompt) == %{"channel" => "dingtalk", "content" => "slow"}
+  end
+
+  test "并发请求下 webhook 语义稳定（统一 accepted）" do
     tasks =
       1..20
       |> Task.async_stream(
@@ -176,9 +203,14 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
       |> Enum.to_list()
 
     assert Enum.all?(tasks, fn
-             {:ok, {"ok", body}} -> body["status"] == "final" and body["code"] == "OK"
-             {:ok, {"timeout", body}} -> body["status"] == "timeout" and body["code"] == "CLI_TIMEOUT"
-             _ -> false
+             {:ok, {"ok", body}} ->
+               body["status"] == "accepted" and body["code"] == "ACCEPTED"
+
+             {:ok, {"timeout", body}} ->
+               body["status"] == "accepted" and body["code"] == "ACCEPTED"
+
+             _ ->
+               false
            end)
   end
 end
