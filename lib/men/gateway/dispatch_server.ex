@@ -255,20 +255,23 @@ defmodule Men.Gateway.DispatchServer do
   defp resolve_runtime_session_id(%{session_coordinator_enabled: false}, session_key), do: session_key
 
   defp resolve_runtime_session_id(state, session_key) do
-    if coordinator_available?(state.session_coordinator_name) do
-      case SessionCoordinator.get_or_create(state.session_coordinator_name, session_key, &generate_runtime_session_id/0) do
-        {:ok, runtime_session_id} ->
-          runtime_session_id
+    case safe_get_or_create_runtime_session_id(state.session_coordinator_name, session_key) do
+      {:ok, runtime_session_id} ->
+        runtime_session_id
 
-        {:error, _reason} ->
-          session_key
-      end
-    else
-      session_key
+      {:error, _reason} ->
+        session_key
     end
   end
 
-  defp coordinator_available?(name), do: not is_nil(GenServer.whereis(name))
+  # coordinator 可能在调用窗口重启，捕获 exit 以保证 dispatch 可降级。
+  defp safe_get_or_create_runtime_session_id(coordinator_name, session_key) do
+    try do
+      SessionCoordinator.get_or_create(coordinator_name, session_key, &generate_runtime_session_id/0)
+    catch
+      :exit, _reason -> {:error, :session_coordinator_unavailable}
+    end
+  end
 
   defp maybe_invalidate_runtime_session(%{session_coordinator_enabled: false}, _session_key, _runtime_session_id, _error_payload),
     do: :ok
@@ -283,17 +286,22 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   defp invalidate_session_mapping(state, session_key, runtime_session_id, code) do
-    if coordinator_available?(state.session_coordinator_name) do
-      _ =
-        SessionCoordinator.invalidate_by_session_key(state.session_coordinator_name, %{
-          session_key: session_key,
-          runtime_session_id: runtime_session_id,
-          code: code
-        })
+    _ =
+      safe_invalidate_session_mapping(state.session_coordinator_name, %{
+        session_key: session_key,
+        runtime_session_id: runtime_session_id,
+        code: code
+      })
 
-      :ok
-    else
-      :ok
+    :ok
+  end
+
+  # 失效剔除属于尽力而为，coordinator 不可用时不影响主链路返回。
+  defp safe_invalidate_session_mapping(coordinator_name, reason) do
+    try do
+      SessionCoordinator.invalidate_by_session_key(coordinator_name, reason)
+    catch
+      :exit, _reason -> :ignored
     end
   end
 
