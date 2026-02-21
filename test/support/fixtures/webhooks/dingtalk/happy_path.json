@@ -1,0 +1,7 @@
+{
+  "event_type": "message",
+  "event_id": "evt-dingtalk-happy-path",
+  "sender_id": "user_ok",
+  "conversation_id": "conv_ok",
+  "content": "hello"
+}

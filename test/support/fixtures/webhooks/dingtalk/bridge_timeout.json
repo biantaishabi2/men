@@ -1,0 +1,7 @@
+{
+  "event_type": "message",
+  "event_id": "evt-dingtalk-bridge-timeout",
+  "sender_id": "user_timeout",
+  "conversation_id": "conv_timeout",
+  "content": "timeout"
+}

@@ -11,20 +11,31 @@ defmodule Men.Gateway.DispatchServerTest do
     def start_turn(prompt, context) do
       notify({:bridge_called, prompt, context})
 
-      if prompt == "bridge_error" do
-        {:error,
-         %{
-           type: :failed,
-           code: "BRIDGE_FAIL",
-           message: "runtime bridge failed",
-           details: %{source: :mock}
-         }}
-      else
-        {:ok,
-         %{
-           text: "ok:" <> prompt,
-           meta: %{source: :mock, echoed_run_id: context.run_id}
-         }}
+      case prompt do
+        "bridge_error" ->
+          {:error,
+           %{
+             type: :failed,
+             code: "BRIDGE_FAIL",
+             message: "runtime bridge failed",
+             details: %{source: :mock}
+           }}
+
+        "bridge_timeout" ->
+          {:error,
+           %{
+             type: :timeout,
+             code: "CLI_TIMEOUT",
+             message: "runtime timeout",
+             details: %{source: :mock}
+           }}
+
+        _ ->
+          {:ok,
+           %{
+             text: "ok:" <> prompt,
+             meta: %{source: :mock, echoed_run_id: context.run_id}
+           }}
       end
     end
 
@@ -287,5 +298,82 @@ defmodule Men.Gateway.DispatchServerTest do
     assert_receive {:egress_called, _, %ErrorMessage{}}
     assert_receive {:egress_called, _, %ErrorMessage{}}
     refute_receive {:bridge_called, _, _}
+  end
+
+  test "双渠道矩阵: success/error/timeout 的状态与链路字段一致透传" do
+    server = start_dispatch_server()
+
+    scenarios = [
+      %{
+        channel: "feishu",
+        user_id: "u-matrix-f-1",
+        request_id: "req-feishu-success",
+        payload: "hello",
+        expected: {:ok, "ok:hello"}
+      },
+      %{
+        channel: "dingtalk",
+        user_id: "u-matrix-d-1",
+        request_id: "req-dingtalk-success",
+        payload: "hello",
+        expected: {:ok, "ok:hello"}
+      },
+      %{
+        channel: "feishu",
+        user_id: "u-matrix-f-2",
+        request_id: "req-feishu-error",
+        payload: "bridge_error",
+        expected: {:error, "BRIDGE_FAIL", :failed}
+      },
+      %{
+        channel: "dingtalk",
+        user_id: "u-matrix-d-2",
+        request_id: "req-dingtalk-timeout",
+        payload: "bridge_timeout",
+        expected: {:error, "CLI_TIMEOUT", :timeout}
+      }
+    ]
+
+    Enum.each(scenarios, fn scenario ->
+      event = %{
+        request_id: scenario.request_id,
+        run_id: "run-#{scenario.request_id}",
+        payload: scenario.payload,
+        channel: scenario.channel,
+        user_id: scenario.user_id,
+        metadata: %{source: :matrix}
+      }
+
+      expected_session_key = "#{scenario.channel}:#{scenario.user_id}"
+
+      case scenario.expected do
+        {:ok, expected_content} ->
+          assert {:ok, result} = DispatchServer.dispatch(server, event)
+          assert result.request_id == scenario.request_id
+          assert result.run_id == "run-#{scenario.request_id}"
+          assert result.session_key == expected_session_key
+
+          assert_receive {:egress_called, ^expected_session_key, %FinalMessage{} = message}
+          assert message.content == expected_content
+          assert message.metadata.request_id == scenario.request_id
+          assert message.metadata.run_id == "run-#{scenario.request_id}"
+          assert message.metadata.session_key == expected_session_key
+
+        {:error, expected_code, expected_type} ->
+          assert {:error, error_result} = DispatchServer.dispatch(server, event)
+          assert error_result.request_id == scenario.request_id
+          assert error_result.run_id == "run-#{scenario.request_id}"
+          assert error_result.session_key == expected_session_key
+          assert error_result.code == expected_code
+          assert error_result.metadata.type == expected_type
+
+          assert_receive {:egress_called, ^expected_session_key, %ErrorMessage{} = message}
+          assert message.code == expected_code
+          assert message.metadata.request_id == scenario.request_id
+          assert message.metadata.run_id == "run-#{scenario.request_id}"
+          assert message.metadata.session_key == expected_session_key
+          assert message.metadata.type == expected_type
+      end
+    end)
   end
 end

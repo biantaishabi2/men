@@ -20,17 +20,29 @@ defmodule MenWeb.Webhooks.DingtalkController do
     dispatch_server = Keyword.get(config(), :dispatch_server, DispatchServer)
     egress_adapter = Keyword.get(config(), :egress_adapter, DingtalkEgress)
 
-    dispatch_result =
-      case ingress_adapter.normalize(request) do
-        {:ok, inbound_event} -> DispatchServer.dispatch(dispatch_server, inbound_event)
-        {:error, ingress_error} -> {:error, ingress_error_to_dispatch_error(ingress_error)}
-      end
+    case ingress_adapter.normalize(request) do
+      {:ok, inbound_event} ->
+        dispatch_result = DispatchServer.dispatch(dispatch_server, inbound_event)
+        {status, body} = egress_adapter.to_webhook_response(dispatch_result)
 
-    {status, body} = egress_adapter.to_webhook_response(dispatch_result)
+        conn
+        |> put_status(status)
+        |> json(body)
 
-    conn
-    |> put_status(status)
-    |> json(body)
+      {:error, ingress_error} ->
+        if unauthorized_ingress_error?(ingress_error) do
+          conn
+          |> put_status(:unauthorized)
+          |> json(%{error: "unauthorized"})
+        else
+          dispatch_result = {:error, ingress_error_to_dispatch_error(ingress_error)}
+          {status, body} = egress_adapter.to_webhook_response(dispatch_result)
+
+          conn
+          |> put_status(status)
+          |> json(body)
+        end
+    end
   end
 
   defp config do
@@ -58,6 +70,12 @@ defmodule MenWeb.Webhooks.DingtalkController do
       metadata: %{}
     }
   end
+
+  defp unauthorized_ingress_error?(%{} = error) do
+    Map.get(error, :code) in ["INVALID_SIGNATURE", "SIGNATURE_EXPIRED", "MISSING_SIGNATURE"]
+  end
+
+  defp unauthorized_ingress_error?(_), do: false
 
   # 测试/兼容场景下可能拿不到 parser 注入的 raw_body，这里兜底编码一次，
   # 避免 ingress 因空 raw_body 直接拒绝。
