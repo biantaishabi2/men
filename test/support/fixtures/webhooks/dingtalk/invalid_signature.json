@@ -1,0 +1,7 @@
+{
+  "event_type": "message",
+  "event_id": "evt-dingtalk-bridge-error",
+  "sender_id": "user_bridge_error",
+  "conversation_id": "conv_bridge_error",
+  "content": "bridge_error"
+}

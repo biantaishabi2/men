@@ -1,0 +1,22 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "evt-feishu-invalid-signature",
+    "event_type": "im.message.receive_v1",
+    "create_time": "1700000000000",
+    "app_id": "cli_test_bot"
+  },
+  "event": {
+    "sender": {
+      "sender_id": {
+        "open_id": "ou_test_user"
+      }
+    },
+    "message": {
+      "message_id": "om_test_message_invalid",
+      "chat_id": "oc_test_chat",
+      "chat_type": "group",
+      "content": "{\"text\":\"hello\"}"
+    }
+  }
+}

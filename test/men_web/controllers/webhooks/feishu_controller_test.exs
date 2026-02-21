@@ -66,18 +66,30 @@ defmodule MenWeb.Webhooks.FeishuControllerTest do
 
   test "合法签名 webhook 返回 200 并进入 dispatch 主链路", %{conn: conn} do
     server = start_dispatch_server(BridgeOK)
+    test_pid = self()
 
     Application.put_env(:men, MenWeb.Webhooks.FeishuController,
-      dispatch_fun: fn event -> DispatchServer.dispatch(server, event) end
+      dispatch_fun: fn event ->
+        send(test_pid, {:dispatch_called, event})
+        DispatchServer.dispatch(server, event)
+      end
     )
 
-    body = valid_body("evt-http-ok", "hello")
+    body = fixture_raw("feishu/happy_path.json")
     conn = request_with_signature(conn, body, "nonce-http-ok")
     conn = post(conn, "/webhooks/feishu", body)
 
     assert json_response(conn, 200)["status"] == "accepted"
+    assert_receive {:dispatch_called, event}, 1_000
+    assert event.request_id == "evt-feishu-happy-path"
+    assert event.run_id == "evt-feishu-happy-path"
+    assert event.channel == "feishu"
+    assert event.user_id == "ou_test_user"
+    assert event.group_id == "oc_test_chat"
+
     assert_receive {:transport_post, _url, _headers, payload}
-    assert Jason.decode!(payload)["content"]["text"] == "ok:hello"
+    decoded = Jason.decode!(payload)
+    assert decoded["content"]["text"] == "ok:hello"
   end
 
   test "非法签名 webhook 返回 401 且不触发 dispatch", %{conn: conn} do
@@ -88,7 +100,7 @@ defmodule MenWeb.Webhooks.FeishuControllerTest do
       end
     )
 
-    body = valid_body("evt-http-unauthorized", "hello")
+    body = fixture_raw("feishu/invalid_signature.json")
     conn = request_with_signature(conn, body, "nonce-http-bad")
     conn = put_req_header(conn, "x-lark-signature", "broken-signature")
     conn = post(conn, "/webhooks/feishu", body)
@@ -99,16 +111,27 @@ defmodule MenWeb.Webhooks.FeishuControllerTest do
 
   test "bridge 失败时 webhook 仍返回 200 并触发 error_reply", %{conn: conn} do
     server = start_dispatch_server(BridgeFail)
+    test_pid = self()
 
     Application.put_env(:men, MenWeb.Webhooks.FeishuController,
-      dispatch_fun: fn event -> DispatchServer.dispatch(server, event) end
+      dispatch_fun: fn event ->
+        send(test_pid, {:dispatch_called, event})
+        DispatchServer.dispatch(server, event)
+      end
     )
 
-    body = valid_body("evt-http-bridge-fail", "hello")
+    body = fixture_raw("feishu/bridge_fail.json")
     conn = request_with_signature(conn, body, "nonce-http-bridge-fail")
     conn = post(conn, "/webhooks/feishu", body)
 
     assert json_response(conn, 200)["status"] == "accepted"
+    assert_receive {:dispatch_called, event}, 1_000
+    assert event.request_id == "evt-feishu-bridge-fail"
+    assert event.run_id == "evt-feishu-bridge-fail"
+    assert event.channel == "feishu"
+    assert event.user_id == "ou_test_user"
+    assert event.group_id == "oc_test_chat"
+
     assert_receive {:transport_post, _url, _headers, payload}
 
     decoded = Jason.decode!(payload)
@@ -124,31 +147,6 @@ defmodule MenWeb.Webhooks.FeishuControllerTest do
     )
   end
 
-  defp valid_body(event_id, text) do
-    Jason.encode!(%{
-      "schema" => "2.0",
-      "header" => %{
-        "event_id" => event_id,
-        "event_type" => "im.message.receive_v1",
-        "create_time" => "1700000000000",
-        "app_id" => "cli_test_bot"
-      },
-      "event" => %{
-        "sender" => %{
-          "sender_id" => %{
-            "open_id" => "ou_test_user"
-          }
-        },
-        "message" => %{
-          "message_id" => "om_test_message",
-          "chat_id" => "oc_test_chat",
-          "chat_type" => "group",
-          "content" => Jason.encode!(%{"text" => text})
-        }
-      }
-    })
-  end
-
   defp request_with_signature(conn, body, nonce) do
     timestamp = System.system_time(:second)
     base = "#{timestamp}\n#{nonce}\n#{body}"
@@ -162,5 +160,12 @@ defmodule MenWeb.Webhooks.FeishuControllerTest do
     |> put_req_header("x-lark-request-timestamp", Integer.to_string(timestamp))
     |> put_req_header("x-lark-nonce", nonce)
     |> put_req_header("x-lark-signature", signature)
+  end
+
+  defp fixture_raw(path) do
+    "test/support/fixtures/webhooks"
+    |> Path.join(path)
+    |> File.read!()
+    |> String.trim()
   end
 end
