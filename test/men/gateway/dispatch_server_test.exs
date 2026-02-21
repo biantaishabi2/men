@@ -82,11 +82,17 @@ defmodule Men.Gateway.DispatchServerTest do
     :ok
   end
 
+  defp start_dispatch_server do
+    start_supervised!(
+      {DispatchServer,
+       name: {:global, {__MODULE__, self(), make_ref()}},
+       bridge_adapter: MockBridge,
+       egress_adapter: MockEgress}
+    )
+  end
+
   test "有效 inbound event: bridge 成功并触发 final egress" do
-    server =
-      start_supervised!(
-        {DispatchServer, bridge_adapter: MockBridge, egress_adapter: MockEgress}
-      )
+    server = start_dispatch_server()
 
     event = %{
       request_id: "req-1",
@@ -111,10 +117,7 @@ defmodule Men.Gateway.DispatchServerTest do
   end
 
   test "bridge error: 触发 error egress 并返回 error_result" do
-    server =
-      start_supervised!(
-        {DispatchServer, bridge_adapter: MockBridge, egress_adapter: MockEgress}
-      )
+    server = start_dispatch_server()
 
     event = %{
       request_id: "req-2",
@@ -136,10 +139,7 @@ defmodule Men.Gateway.DispatchServerTest do
   test "error egress 失败: 调用方可感知 EGRESS_ERROR" do
     Application.put_env(:men, :dispatch_server_test_fail_error_egress, :error_channel_unavailable)
 
-    server =
-      start_supervised!(
-        {DispatchServer, bridge_adapter: MockBridge, egress_adapter: MockEgress}
-      )
+    server = start_dispatch_server()
 
     event = %{
       request_id: "req-2b",
@@ -157,10 +157,7 @@ defmodule Men.Gateway.DispatchServerTest do
   end
 
   test "重复 run_id: 返回 duplicate 且不重复 egress" do
-    server =
-      start_supervised!(
-        {DispatchServer, bridge_adapter: MockBridge, egress_adapter: MockEgress}
-      )
+    server = start_dispatch_server()
 
     event = %{
       request_id: "req-3",
@@ -181,10 +178,7 @@ defmodule Men.Gateway.DispatchServerTest do
   test "egress 失败返回 EGRESS_ERROR 时不标记 processed，可同 run_id 重试" do
     Application.put_env(:men, :dispatch_server_test_fail_final_egress, :downstream_unavailable)
 
-    server =
-      start_supervised!(
-        {DispatchServer, bridge_adapter: MockBridge, egress_adapter: MockEgress}
-      )
+    server = start_dispatch_server()
 
     event = %{
       request_id: "req-3b",
@@ -205,10 +199,7 @@ defmodule Men.Gateway.DispatchServerTest do
   end
 
   test "同 session 连续消息: session_key 一致且可连续处理" do
-    server =
-      start_supervised!(
-        {DispatchServer, bridge_adapter: MockBridge, egress_adapter: MockEgress}
-      )
+    server = start_dispatch_server()
 
     event1 = %{
       request_id: "req-4-1",
@@ -237,10 +228,7 @@ defmodule Men.Gateway.DispatchServerTest do
   end
 
   test "同 run_id 并发提交: 只处理一次，其余命中 duplicate" do
-    server =
-      start_supervised!(
-        {DispatchServer, bridge_adapter: MockBridge, egress_adapter: MockEgress}
-      )
+    server = start_dispatch_server()
 
     event = %{
       request_id: "req-5",
@@ -269,10 +257,7 @@ defmodule Men.Gateway.DispatchServerTest do
   end
 
   test "关键边界输入: 非法 request_id / metadata 非 map / 路由字段不足" do
-    server =
-      start_supervised!(
-        {DispatchServer, bridge_adapter: MockBridge, egress_adapter: MockEgress}
-      )
+    server = start_dispatch_server()
 
     invalid_events = [
       %{request_id: "", payload: "hello", channel: "feishu", user_id: "u600"},
