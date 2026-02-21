@@ -17,5 +17,4 @@ jobs:
       workflow_source_repo: biantaishabi2/Cli
       workflow_source_ref: master
       issue_number: ${{ format('{0}', github.event.issue.number) }}
-      skip_test_gate: true
     secrets: inherit
