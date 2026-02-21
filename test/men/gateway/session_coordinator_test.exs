@@ -116,6 +116,40 @@ defmodule Men.Gateway.SessionCoordinatorTest do
     assert {:ok, "runtime-2"} = SessionCoordinator.get_or_create(name, "session-A", create_fun)
   end
 
+  test "按 runtime_session_id 失效后下次重新创建" do
+    {name, _pid} = start_coordinator()
+    counter = :atomics.new(1, [])
+
+    create_fun = fn ->
+      id = :atomics.add_get(counter, 1, 1)
+      "runtime-" <> Integer.to_string(id)
+    end
+
+    assert {:ok, "runtime-1"} = SessionCoordinator.get_or_create(name, "session-A", create_fun)
+
+    assert :ok =
+             SessionCoordinator.invalidate_by_runtime_session_id(name, %{
+               runtime_session_id: "runtime-1",
+               code: :runtime_session_not_found
+             })
+
+    assert {:ok, "runtime-2"} = SessionCoordinator.get_or_create(name, "session-A", create_fun)
+  end
+
+  test "非白名单错误码返回 ignored 且不删除映射" do
+    {name, _pid} = start_coordinator()
+
+    assert {:ok, "runtime-A"} = SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A" end)
+
+    assert :ignored =
+             SessionCoordinator.invalidate_by_runtime_session_id(name, %{
+               runtime_session_id: "runtime-A",
+               code: :some_other_error
+             })
+
+    assert {:ok, "runtime-A"} = SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A-new" end)
+  end
+
   test "达到容量后按 LRU 淘汰最旧 last_access_at" do
     {name, _pid} = start_coordinator(max_entries: 2)
 
