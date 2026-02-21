@@ -16,3 +16,8 @@ Ready to run in production? Please [check our deployment guides](https://hexdocs
   * Docs: https://hexdocs.pm/phoenix
   * Forum: https://elixirforum.com/c/phoenix-forum
   * Source: https://github.com/phoenixframework/phoenix
+
+## Workflow Trigger Smoke Test
+
+- 验证时间: 2026-02-21
+- 目的: 验证 PR 合并后会触发 orchestrate control run
