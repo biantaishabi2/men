@@ -44,10 +44,20 @@ defmodule Men.Channels.Ingress.FeishuAdapter do
     defp ensure_table! do
       case :ets.whereis(@table) do
         :undefined ->
+          heir = Process.whereis(:init)
+
+          table_opts =
+            if is_pid(heir) do
+              [{:heir, heir, :keep} | [:named_table, :public, :set, read_concurrency: true]]
+            else
+              [:named_table, :public, :set, read_concurrency: true]
+            end
+
           try do
-            :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
+            :ets.new(@table, table_opts)
           rescue
-            ArgumentError -> :ok
+            # 并发创建竞争：若已被其他进程创建，重查一次即可。
+            ArgumentError -> ensure_table!()
           end
 
         _tid ->
