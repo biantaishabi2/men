@@ -112,7 +112,9 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
     assert body["request_id"] == "req-ok"
     assert is_binary(body["run_id"])
 
-    assert_receive {:ingress_called, _request}
+    assert_receive {:ingress_called, request}
+    assert is_binary(request.raw_body)
+    assert Jason.decode!(request.raw_body) == %{"mode" => "ok"}
 
     assert_receive {:bridge_called, prompt, _context}
     assert Jason.decode!(prompt) == %{"channel" => "dingtalk", "content" => "hello"}
@@ -146,5 +148,31 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
 
     assert_receive {:bridge_called, prompt, _context}
     assert Jason.decode!(prompt) == %{"channel" => "dingtalk", "content" => "timeout"}
+  end
+
+  test "并发请求下 dispatch 与回写语义稳定" do
+    tasks =
+      1..20
+      |> Task.async_stream(
+        fn index ->
+          mode = if rem(index, 2) == 0, do: "timeout", else: "ok"
+
+          conn =
+            Phoenix.ConnTest.build_conn()
+            |> post("/webhooks/dingtalk", %{"mode" => mode})
+
+          {mode, json_response(conn, 200)}
+        end,
+        timeout: 5_000,
+        max_concurrency: 10,
+        ordered: false
+      )
+      |> Enum.to_list()
+
+    assert Enum.all?(tasks, fn
+             {:ok, {"ok", body}} -> body["status"] == "final" and body["code"] == "OK"
+             {:ok, {"timeout", body}} -> body["status"] == "timeout" and body["code"] == "CLI_TIMEOUT"
+             _ -> false
+           end)
   end
 end

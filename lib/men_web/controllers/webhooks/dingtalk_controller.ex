@@ -13,7 +13,7 @@ defmodule MenWeb.Webhooks.DingtalkController do
     request = %{
       headers: Map.new(conn.req_headers),
       body: params,
-      raw_body: conn.assigns[:raw_body]
+      raw_body: conn.assigns[:raw_body] || conn.private[:raw_body]
     }
 
     ingress_adapter = Keyword.get(config(), :ingress_adapter, DingtalkIngress)

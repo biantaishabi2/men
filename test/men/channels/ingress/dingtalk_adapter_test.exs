@@ -74,6 +74,50 @@ defmodule Men.Channels.Ingress.DingtalkAdapterTest do
     assert error.code == "INVALID_SIGNATURE"
   end
 
+  test "缺失签名会返回 INVALID_SIGNATURE" do
+    body = %{
+      "event_type" => "message",
+      "sender_id" => "user-1",
+      "conversation_id" => "conv-1",
+      "content" => "hello"
+    }
+
+    timestamp = System.system_time(:second)
+
+    request = %{
+      headers: %{
+        "x-dingtalk-timestamp" => Integer.to_string(timestamp)
+      },
+      body: body,
+      raw_body: Jason.encode!(body)
+    }
+
+    assert {:error, error} = DingtalkAdapter.normalize(request)
+    assert error.code == "INVALID_SIGNATURE"
+    assert error.details.field == :signature
+  end
+
+  test "缺失 raw_body 会被拒绝，不回退重编码验签" do
+    body = %{
+      "event_type" => "message",
+      "sender_id" => "user-1",
+      "conversation_id" => "conv-1",
+      "content" => "hello"
+    }
+
+    timestamp = System.system_time(:second)
+    raw_body = Jason.encode!(body)
+
+    request = %{
+      headers: signed_headers(timestamp, raw_body),
+      body: body
+    }
+
+    assert {:error, error} = DingtalkAdapter.normalize(request)
+    assert error.code == "INVALID_REQUEST"
+    assert error.details.field == :raw_body
+  end
+
   test "签名时间超窗会被拒绝" do
     body = %{
       "event_type" => "message",

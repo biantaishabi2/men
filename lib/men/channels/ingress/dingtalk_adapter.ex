@@ -133,23 +133,19 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
     if is_binary(signature) and signature != "" do
       {:ok, signature}
     else
-      invalid_field(:signature, "missing signature")
+      invalid_signature("missing signature")
     end
   end
 
   defp fetch_raw_body(%{raw_body: raw_body}, _body) when is_binary(raw_body), do: {:ok, raw_body}
 
-  defp fetch_raw_body(_request, body) do
-    case Jason.encode(body) do
-      {:ok, encoded} -> {:ok, encoded}
-      {:error, reason} ->
-        {:error,
-         %{
-           code: "INVALID_PAYLOAD",
-           message: "payload encode failed",
-           details: %{reason: inspect(reason)}
-         }}
-    end
+  defp fetch_raw_body(_request, _body) do
+    {:error,
+     %{
+       code: "INVALID_REQUEST",
+       message: "raw body is required for signature verification",
+       details: %{field: :raw_body}
+     }}
   end
 
   defp verify_signature(secret, timestamp, raw_body, signature) do
@@ -162,12 +158,7 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
     if Plug.Crypto.secure_compare(expected_signature, signature) do
       :ok
     else
-      {:error,
-       %{
-         code: "INVALID_SIGNATURE",
-         message: "invalid signature",
-         details: %{}
-       }}
+      invalid_signature("invalid signature")
     end
   end
 
@@ -201,6 +192,15 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
        code: "MISSING_FIELD",
        message: "invalid or missing field",
        details: %{field: field, reason: reason}
+     }}
+  end
+
+  defp invalid_signature(reason) do
+    {:error,
+     %{
+       code: "INVALID_SIGNATURE",
+       message: "invalid signature",
+       details: %{field: :signature, reason: reason}
      }}
   end
 
