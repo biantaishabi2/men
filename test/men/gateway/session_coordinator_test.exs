@@ -209,6 +209,29 @@ defmodule Men.Gateway.SessionCoordinatorTest do
     assert :atomics.get(counter, 1) == 1
   end
 
+  test "create_fun 返回非法 runtime_session_id 时返回错误且不写入映射" do
+    {name, _pid} = start_coordinator()
+
+    assert {:error, {:invalid_runtime_session_id, nil}} =
+             SessionCoordinator.get_or_create(name, "session-invalid", fn -> nil end)
+
+    assert {:ok, "runtime-valid"} =
+             SessionCoordinator.get_or_create(name, "session-invalid", fn -> "runtime-valid" end)
+  end
+
+  test "invalidate 传入非法 reason 时返回 ignored 且不删除映射" do
+    {name, _pid} = start_coordinator()
+
+    assert {:ok, "runtime-A"} = SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A" end)
+    assert {:ok, "runtime-B"} = SessionCoordinator.get_or_create(name, "session-B", fn -> "runtime-B" end)
+
+    assert :ignored = SessionCoordinator.invalidate_by_runtime_session_id(name, %{code: :runtime_session_not_found})
+    assert :ignored = SessionCoordinator.invalidate_by_session_key(name, {:bad_reason})
+
+    assert {:ok, "runtime-A"} = SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A-new" end)
+    assert {:ok, "runtime-B"} = SessionCoordinator.get_or_create(name, "session-B", fn -> "runtime-B-new" end)
+  end
+
   test "coordinator 关闭时 dispatch 回退到一次一会话策略" do
     server =
       start_supervised!(
