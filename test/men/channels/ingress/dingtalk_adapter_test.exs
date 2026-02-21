@@ -36,19 +36,11 @@ defmodule Men.Channels.Ingress.DingtalkAdapterTest do
 
     assert {:ok, event} = DingtalkAdapter.normalize(request)
     assert event.channel == "dingtalk"
+    assert event.event_type == "message"
     assert event.user_id == "user-1"
     assert event.request_id == "evt-1"
-
-    assert event.payload == %{
-             channel: "dingtalk",
-             event_type: "message",
-             sender_id: "user-1",
-             conversation_id: "conv-1",
-             content: "hello dingtalk",
-             raw_payload: body
-           }
-
-    assert event.metadata.raw_payload == body
+    assert event.payload == "hello dingtalk"
+    assert event.metadata.raw == body
   end
 
   test "签名错误会被拒绝" do
@@ -70,8 +62,7 @@ defmodule Men.Channels.Ingress.DingtalkAdapterTest do
       raw_body: Jason.encode!(body)
     }
 
-    assert {:error, error} = DingtalkAdapter.normalize(request)
-    assert error.code == "INVALID_SIGNATURE"
+    assert {:error, :signature_invalid} = DingtalkAdapter.normalize(request)
   end
 
   test "缺失签名会返回 INVALID_SIGNATURE" do
@@ -92,9 +83,7 @@ defmodule Men.Channels.Ingress.DingtalkAdapterTest do
       raw_body: Jason.encode!(body)
     }
 
-    assert {:error, error} = DingtalkAdapter.normalize(request)
-    assert error.code == "INVALID_SIGNATURE"
-    assert error.details.field == :signature
+    assert {:error, :signature_invalid} = DingtalkAdapter.normalize(request)
   end
 
   test "缺失 raw_body 会被拒绝，不回退重编码验签" do
@@ -135,8 +124,7 @@ defmodule Men.Channels.Ingress.DingtalkAdapterTest do
       raw_body: raw_body
     }
 
-    assert {:error, error} = DingtalkAdapter.normalize(request)
-    assert error.code == "SIGNATURE_EXPIRED"
+    assert {:error, :signature_invalid} = DingtalkAdapter.normalize(request)
   end
 
   test "缺失关键字段返回字段错误并保留 raw_payload" do

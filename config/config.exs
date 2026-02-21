@@ -17,13 +17,31 @@ config :men, Men.Gateway.DispatchServer,
   storage_adapter: :memory
 
 config :men, Men.Channels.Ingress.FeishuAdapter,
+  signing_secret: System.get_env("FEISHU_SIGNING_SECRET"),
   sign_mode: :strict,
   replay_backend: Men.Channels.Ingress.FeishuAdapter.ReplayBackend.ETS,
   bots: %{}
 
+config :men, Men.Channels.Ingress.DingtalkAdapter,
+  secret: System.get_env("DINGTALK_WEBHOOK_SECRET"),
+  signature_window_seconds: String.to_integer(System.get_env("DINGTALK_SIGNATURE_WINDOW_SECONDS") || "300")
+
 config :men, Men.Channels.Egress.FeishuAdapter,
   base_url: "https://open.feishu.cn",
+  bot_access_token: System.get_env("FEISHU_BOT_ACCESS_TOKEN"),
   bots: %{}
+
+config :men, Men.Channels.Egress.DingtalkAdapter,
+  webhook_url: System.get_env("DINGTALK_EGRESS_WEBHOOK_URL")
+
+config :men, :runtime_bridge,
+  timeout_ms: String.to_integer(System.get_env("RUNTIME_BRIDGE_TIMEOUT_MS") || "30000")
+
+config :men, :gateway_log_fields, [:request_id, :session_key, :run_id, :channel, :event_type, :stage]
+
+config :logger, :console,
+  format: "$time $metadata[$level] $message\n",
+  metadata: [:request_id, :session_key, :run_id, :channel, :event_type, :stage]
 
 # Configures the endpoint
 config :men, MenWeb.Endpoint,
@@ -66,11 +84,6 @@ config :tailwind,
     ),
     cd: Path.expand("../assets", __DIR__)
   ]
-
-# Configures Elixir's Logger
-config :logger, :console,
-  format: "$time $metadata[$level] $message\n",
-  metadata: [:request_id]
 
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason

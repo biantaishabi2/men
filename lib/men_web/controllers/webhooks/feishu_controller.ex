@@ -18,7 +18,7 @@ defmodule MenWeb.Webhooks.FeishuController do
         json(conn, %{status: "accepted", code: "ACCEPTED", request_id: inbound_event.request_id})
 
       {:error, reason} ->
-        if FeishuAdapter.unauthorized_reason?(reason) do
+        if reason == :signature_invalid or FeishuAdapter.unauthorized_reason?(reason) do
           conn
           |> put_status(:unauthorized)
           |> json(%{error: "unauthorized"})

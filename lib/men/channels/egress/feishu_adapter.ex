@@ -83,14 +83,15 @@ defmodule Men.Channels.Egress.FeishuAdapter do
 
   defp normalize_target(target, metadata) do
     target_map = if is_map(target), do: target, else: %{}
+    merged_metadata = Map.merge(Map.get(target_map, :metadata, %{}), metadata)
 
     %{
       "reply_token" =>
-        target_map["reply_token"] || target_map[:reply_token] || metadata["reply_token"] ||
-          metadata[:reply_token] || metadata["message_id"] || metadata[:message_id],
+        target_map["reply_token"] || target_map[:reply_token] || merged_metadata["reply_token"] ||
+          merged_metadata[:reply_token] || merged_metadata["message_id"] || merged_metadata[:message_id],
       "app_id" =>
-        target_map["app_id"] || target_map[:app_id] || metadata["feishu_app_id"] ||
-          metadata[:feishu_app_id]
+        target_map["app_id"] || target_map[:app_id] || merged_metadata["feishu_app_id"] ||
+          merged_metadata[:feishu_app_id]
     }
   end
 

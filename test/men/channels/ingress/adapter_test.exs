@@ -1,52 +1,38 @@
 defmodule Men.Channels.Ingress.AdapterTest do
   use ExUnit.Case, async: true
 
-  alias Men.Channels.Ingress.Event
-
   defmodule MockIngressAdapter do
     @behaviour Men.Channels.Ingress.Adapter
 
     @impl true
-    def normalize(%{text: text, user: user, channel: channel}) do
+    def normalize(%{text: text, user: user, channel: channel, event_type: event_type}) do
       {:ok,
-       %Event{
+       %{
+         request_id: "req-1",
+         payload: text,
          channel: channel,
+         event_type: event_type,
          user_id: user,
-         content: text,
-         metadata: %{source: :mock},
-         timestamp: DateTime.utc_now()
+         metadata: %{"source" => "mock"}
        }}
     end
 
+    def normalize(%{mode: :signature_invalid}), do: {:error, :signature_invalid}
     def normalize(_), do: {:error, :invalid_payload}
   end
 
-  test "Event 结构体可构造" do
-    now = DateTime.utc_now()
+  test "mock adapter 返回标准 inbound_event" do
+    payload = %{text: "hi", user: "u1", channel: "feishu", event_type: "message"}
 
-    event = %Event{
-      channel: "feishu",
-      user_id: "u1",
-      group_id: "g1",
-      thread_id: "t1",
-      content: "hello",
-      metadata: %{lang: "zh"},
-      timestamp: now
-    }
-
+    assert {:ok, event} = MockIngressAdapter.normalize(payload)
+    assert event.request_id == "req-1"
+    assert event.payload == "hi"
     assert event.channel == "feishu"
+    assert event.event_type == "message"
     assert event.user_id == "u1"
-    assert event.metadata == %{lang: "zh"}
-    assert event.timestamp == now
   end
 
-  test "mock adapter 满足 behaviour 并返回统一 Event" do
-    payload = %{text: "hi", user: "u1", channel: "feishu"}
-
-    assert {:ok, %Event{} = event} = MockIngressAdapter.normalize(payload)
-    assert event.channel == "feishu"
-    assert event.user_id == "u1"
-    assert event.content == "hi"
-    assert event.metadata == %{source: :mock}
+  test "mock adapter 可返回统一签名错误" do
+    assert {:error, :signature_invalid} = MockIngressAdapter.normalize(%{mode: :signature_invalid})
   end
 end

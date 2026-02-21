@@ -27,6 +27,7 @@ defmodule Men.Channels.Ingress.FeishuAdapterTest do
     assert event.run_id == "evt-ok-1"
     assert event.payload == "hello"
     assert event.channel == "feishu"
+    assert event.event_type == "im.message.receive_v1"
     assert event.user_id == "ou_test_user"
     assert event.group_id == "oc_test_chat"
     assert event.metadata["reply_token"] == "om_test_message"
@@ -41,7 +42,7 @@ defmodule Men.Channels.Ingress.FeishuAdapterTest do
       signed_headers(timestamp, nonce, body)
       |> Map.put("x-lark-signature", "invalid")
 
-    assert {:error, :invalid_signature} = FeishuAdapter.normalize(%{headers: headers, body: body})
+    assert {:error, :signature_invalid} = FeishuAdapter.normalize(%{headers: headers, body: body})
   end
 
   test "strict 模式时间窗为 ±5 分钟，超窗拒绝" do
@@ -50,7 +51,7 @@ defmodule Men.Channels.Ingress.FeishuAdapterTest do
     body = valid_body("evt-window-strict", "hello")
     headers = signed_headers(timestamp, nonce, body)
 
-    assert {:error, :timestamp_expired} = FeishuAdapter.normalize(%{headers: headers, body: body})
+    assert {:error, :signature_invalid} = FeishuAdapter.normalize(%{headers: headers, body: body})
   end
 
   test "compat 模式时间窗放宽到 ±15 分钟且关闭 nonce 去重" do
@@ -75,7 +76,7 @@ defmodule Men.Channels.Ingress.FeishuAdapterTest do
     headers = signed_headers(timestamp, nonce, body)
 
     assert {:ok, _event} = FeishuAdapter.normalize(%{headers: headers, body: body})
-    assert {:error, :replay_detected} = FeishuAdapter.normalize(%{headers: headers, body: body})
+    assert {:error, :signature_invalid} = FeishuAdapter.normalize(%{headers: headers, body: body})
   end
 
   test "strict 模式并发重放时仅允许一次通过" do
@@ -94,7 +95,7 @@ defmodule Men.Channels.Ingress.FeishuAdapterTest do
       |> Enum.map(fn {:ok, result} -> result end)
 
     ok_count = Enum.count(results, &match?({:ok, _}, &1))
-    replay_count = Enum.count(results, &match?({:error, :replay_detected}, &1))
+    replay_count = Enum.count(results, &match?({:error, :signature_invalid}, &1))
 
     assert ok_count == 1
     assert replay_count == 19

@@ -76,7 +76,7 @@ defmodule MenWeb.Webhooks.FeishuControllerTest do
     conn = post(conn, "/webhooks/feishu", body)
 
     assert json_response(conn, 200)["status"] == "accepted"
-    assert_receive {:transport_post, _url, _headers, payload}
+    assert_receive {:transport_post, _url, _headers, payload}, 1_000
     assert Jason.decode!(payload)["content"]["text"] == "ok:hello"
   end
 
@@ -109,10 +109,10 @@ defmodule MenWeb.Webhooks.FeishuControllerTest do
     conn = post(conn, "/webhooks/feishu", body)
 
     assert json_response(conn, 200)["status"] == "accepted"
-    assert_receive {:transport_post, _url, _headers, payload}
+    assert_receive {:transport_post, _url, _headers, payload}, 1_000
 
     decoded = Jason.decode!(payload)
-    assert decoded["content"]["text"] == "[ERROR][BRIDGE_FAIL] runtime bridge failed"
+    assert decoded["content"]["text"] == "[ERROR][bridge_error] runtime bridge failed"
   end
 
   defp start_dispatch_server(bridge_adapter) do

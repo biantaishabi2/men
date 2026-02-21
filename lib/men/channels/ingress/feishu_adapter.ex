@@ -79,6 +79,12 @@ defmodule Men.Channels.Ingress.FeishuAdapter do
          :ok <- validate_signature(headers, body, bot_id, config),
          {:ok, event} <- to_inbound_event(payload, bot_id, config) do
       {:ok, event}
+    else
+      {:error, reason} when reason in @unauthorized_reasons ->
+        {:error, :signature_invalid}
+
+      other ->
+        other
     end
   end
 
@@ -171,6 +177,7 @@ defmodule Men.Channels.Ingress.FeishuAdapter do
         run_id: event_id,
         payload: content,
         channel: "feishu",
+        event_type: get_in(payload, ["header", "event_type"]) || "message",
         user_id: user_id,
         group_id: group_id_from_chat(chat_type, chat_id),
         thread_id: thread_id,

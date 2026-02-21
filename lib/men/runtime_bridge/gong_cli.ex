@@ -74,6 +74,7 @@ defmodule Men.RuntimeBridge.GongCLI do
 
         {:ok,
          %{
+           status: :ok,
            text: text,
            meta: %{
              run_id: run_id,
@@ -96,10 +97,11 @@ defmodule Men.RuntimeBridge.GongCLI do
 
         {:error,
          %{
+           status: :error,
            type: :failed,
            code: "CLI_EXIT_#{exit_code}",
-           message: "gong cli exited with non-zero status #{exit_code}",
-           run_id: run_id,
+            message: "gong cli exited with non-zero status #{exit_code}",
+            run_id: run_id,
            request_id: request_id,
            session_key: session_key,
            details: %{
@@ -121,10 +123,11 @@ defmodule Men.RuntimeBridge.GongCLI do
 
         {:error,
          %{
+           status: :timeout,
            type: :timeout,
            code: "CLI_TIMEOUT",
-           message: "gong cli timed out after #{timeout_ms}ms",
-           run_id: run_id,
+            message: "gong cli timed out after #{timeout_ms}ms",
+            run_id: run_id,
            request_id: request_id,
            session_key: session_key,
            details: %{
@@ -372,6 +375,7 @@ defmodule Men.RuntimeBridge.GongCLI do
 
   defp overloaded_error(request_id, session_key, run_id, max_concurrency, duration_ms) do
     %{
+      status: :error,
       type: :overloaded,
       code: "CLI_OVERLOADED",
       message: "runtime bridge is overloaded with max_concurrency=#{max_concurrency}",

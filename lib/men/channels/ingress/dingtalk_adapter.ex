@@ -21,44 +21,37 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
          {:ok, conversation_id} <-
            fetch_required_binary(body, ["conversation_id", "conversationId", "chat_id"], :conversation_id),
          {:ok, content} <- fetch_required_binary(body, ["content", "text"], :content) do
-      standardized_payload = %{
-        channel: @channel,
-        event_type: event_type,
-        sender_id: sender_id,
-        conversation_id: conversation_id,
-        content: content,
-        raw_payload: body
-      }
-
       inbound_event = %{
         request_id: resolve_request_id(body),
-        payload: standardized_payload,
+        payload: content,
         channel: @channel,
+        event_type: event_type,
         user_id: sender_id,
+        group_id: conversation_group_id(event_type, conversation_id),
         metadata: %{
           channel: @channel,
           event_type: event_type,
           sender_id: sender_id,
           conversation_id: conversation_id,
-          raw_payload: body,
+          reply_token: conversation_id,
+          raw: body,
           raw_body: raw_body
-        }
+        },
+        raw: body
       }
 
       {:ok, inbound_event}
     else
+      {:error, :signature_invalid} ->
+        {:error, :signature_invalid}
+
       {:error, error} ->
         {:error, attach_raw_payload(error, body)}
     end
   end
 
   def normalize(_raw_message) do
-    {:error,
-     %{
-       code: "INVALID_REQUEST",
-       message: "invalid dingtalk webhook request",
-       details: %{reason: "request must contain headers/body map"}
-     }}
+    {:error, :invalid_request}
   end
 
   defp fetch_secret do
@@ -73,12 +66,7 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
     if is_binary(secret) and secret != "" do
       {:ok, secret}
     else
-      {:error,
-       %{
-         code: "MISSING_SECRET",
-         message: "dingtalk webhook secret is missing",
-         details: %{}
-       }}
+      {:error, :secret_missing}
     end
   end
 
@@ -92,7 +80,7 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
 
     case parse_unix_timestamp(value) do
       {:ok, timestamp} -> {:ok, timestamp}
-      :error -> invalid_field(:timestamp, "missing or invalid timestamp")
+      :error -> {:error, :signature_invalid}
     end
   end
 
@@ -118,12 +106,7 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
     if abs(now - timestamp) <= window_seconds do
       :ok
     else
-      {:error,
-       %{
-         code: "SIGNATURE_EXPIRED",
-         message: "signature timestamp expired",
-         details: %{timestamp: timestamp, now: now, window_seconds: window_seconds}
-       }}
+      {:error, :signature_invalid}
     end
   end
 
@@ -133,19 +116,14 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
     if is_binary(signature) and signature != "" do
       {:ok, signature}
     else
-      invalid_signature("missing signature")
+      {:error, :signature_invalid}
     end
   end
 
   defp fetch_raw_body(%{raw_body: raw_body}, _body) when is_binary(raw_body), do: {:ok, raw_body}
 
   defp fetch_raw_body(_request, _body) do
-    {:error,
-     %{
-       code: "INVALID_REQUEST",
-       message: "raw body is required for signature verification",
-       details: %{field: :raw_body}
-     }}
+    {:error, :invalid_request}
   end
 
   defp verify_signature(secret, timestamp, raw_body, signature) do
@@ -158,7 +136,7 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
     if Plug.Crypto.secure_compare(expected_signature, signature) do
       :ok
     else
-      invalid_signature("invalid signature")
+      {:error, :signature_invalid}
     end
   end
 
@@ -195,16 +173,25 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
      }}
   end
 
-  defp invalid_signature(reason) do
-    {:error,
-     %{
-       code: "INVALID_SIGNATURE",
-       message: "invalid signature",
-       details: %{field: :signature, reason: reason}
-     }}
+  # 失败分支也保留原始 payload，便于排障。
+  defp attach_raw_payload(:signature_invalid, _raw_payload), do: :signature_invalid
+
+  defp attach_raw_payload(:invalid_request, raw_payload) do
+    %{
+      code: "INVALID_REQUEST",
+      message: "raw body is required for signature verification",
+      details: %{field: :raw_body, raw_payload: raw_payload}
+    }
   end
 
-  # 失败分支也保留原始 payload，便于排障。
+  defp attach_raw_payload(:secret_missing, raw_payload) do
+    %{
+      code: "SECRET_MISSING",
+      message: "dingtalk webhook secret is missing",
+      details: %{raw_payload: raw_payload}
+    }
+  end
+
   defp attach_raw_payload(%{details: details} = error, raw_payload) when is_map(details) do
     Map.put(error, :details, Map.put(details, :raw_payload, raw_payload))
   end
@@ -212,4 +199,7 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
   defp attach_raw_payload(error, raw_payload) do
     Map.put(error, :raw_payload, raw_payload)
   end
+
+  defp conversation_group_id("group", conversation_id), do: conversation_id
+  defp conversation_group_id(_, _), do: nil
 end
