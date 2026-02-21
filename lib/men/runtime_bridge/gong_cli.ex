@@ -25,7 +25,9 @@ defmodule Men.RuntimeBridge.GongCLI do
     cfg = runtime_config()
     timeout_ms = Keyword.get(cfg, :timeout_ms, @default_timeout_ms)
     max_concurrency = Keyword.get(cfg, :max_concurrency, @default_max_concurrency)
-    backpressure_strategy = Keyword.get(cfg, :backpressure_strategy, @default_backpressure_strategy)
+
+    backpressure_strategy =
+      Keyword.get(cfg, :backpressure_strategy, @default_backpressure_strategy)
 
     case acquire_slot(max_concurrency, backpressure_strategy) do
       :ok ->
@@ -139,7 +141,7 @@ defmodule Men.RuntimeBridge.GongCLI do
 
   defp run_cli_command(prompt, request_id, session_key, run_id, cfg, timeout_ms) do
     command = Keyword.get(cfg, :command, "gong")
-    args = build_args(cfg, prompt, request_id, session_key, run_id)
+    args = build_args(command, cfg, prompt, request_id, session_key, run_id)
 
     case resolve_command_path(command) do
       {:ok, command_path} ->
@@ -177,7 +179,10 @@ defmodule Men.RuntimeBridge.GongCLI do
 
       nil ->
         shutdown_result = Task.shutdown(task, shutdown_timeout_ms)
-        final_shutdown_result = if is_nil(shutdown_result), do: Task.shutdown(task, :brutal_kill), else: shutdown_result
+
+        final_shutdown_result =
+          if is_nil(shutdown_result), do: Task.shutdown(task, :brutal_kill), else: shutdown_result
+
         {:timeout, "", %{task_shutdown: inspect(final_shutdown_result), source: :outer_guard}}
     end
   end
@@ -262,9 +267,7 @@ defmodule Men.RuntimeBridge.GongCLI do
 
       _ ->
         {_, code} =
-          System.cmd("pkill", [signal, "-P", Integer.to_string(os_pid)],
-            stderr_to_stdout: true
-          )
+          System.cmd("pkill", [signal, "-P", Integer.to_string(os_pid)], stderr_to_stdout: true)
 
         {:pkill, code}
     end
@@ -305,14 +308,59 @@ defmodule Men.RuntimeBridge.GongCLI do
     end
   end
 
-  defp build_args(cfg, prompt, request_id, session_key, run_id) do
-    base_args = Keyword.get(cfg, :command_args, [])
+  defp build_args(command, cfg, prompt, request_id, session_key, run_id) do
+    base_args = command_base_args(command, cfg)
 
-    base_args
-    |> maybe_put_arg(Keyword.get(cfg, :prompt_arg, "--prompt"), prompt)
-    |> maybe_put_arg(Keyword.get(cfg, :request_id_arg, "--request-id"), request_id)
-    |> maybe_put_arg(Keyword.get(cfg, :session_key_arg, "--session-key"), session_key)
-    |> maybe_put_arg(Keyword.get(cfg, :run_id_arg, "--run-id"), run_id)
+    prompt_as_positional =
+      Keyword.get(cfg, :prompt_as_positional, default_prompt_as_positional?(command))
+
+    prompt_arg = Keyword.get(cfg, :prompt_arg, default_prompt_arg(command))
+
+    args =
+      base_args
+      |> maybe_put_arg(prompt_arg, prompt)
+      |> maybe_put_arg(
+        Keyword.get(cfg, :request_id_arg, default_tracking_arg(command, "--request-id")),
+        request_id
+      )
+      |> maybe_put_arg(
+        Keyword.get(cfg, :session_key_arg, default_tracking_arg(command, "--session-key")),
+        session_key
+      )
+      |> maybe_put_arg(
+        Keyword.get(cfg, :run_id_arg, default_tracking_arg(command, "--run-id")),
+        run_id
+      )
+
+    if prompt_as_positional do
+      args ++ [prompt]
+    else
+      args
+    end
+  end
+
+  # 针对 gong 原生 CLI，默认走 `gong run <prompt>` 位置参数模式。
+  defp command_base_args(command, cfg) do
+    case Keyword.fetch(cfg, :command_args) do
+      {:ok, args} when is_list(args) ->
+        args
+
+      _ ->
+        if default_prompt_as_positional?(command), do: ["run"], else: []
+    end
+  end
+
+  defp default_prompt_as_positional?(command) do
+    Path.basename(to_string(command)) == "gong"
+  end
+
+  defp default_prompt_arg(command) do
+    if default_prompt_as_positional?(command), do: nil, else: "--prompt"
+  end
+
+  # gong 原生 run 子命令不接受这些追踪 flag，默认关闭，避免参数报错。
+  defp default_tracking_arg(command, flag) do
+    if default_prompt_as_positional?(command), do: nil, else: flag
   end
 
   defp maybe_put_arg(args, nil, _value), do: args
