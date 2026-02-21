@@ -50,7 +50,13 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
     def start_turn(prompt, context) do
       notify({:bridge_called, prompt, context})
 
-      if prompt == "{\"channel\":\"dingtalk\",\"content\":\"timeout\"}" do
+      timeout? =
+        case Jason.decode(prompt) do
+          {:ok, %{"content" => "timeout"}} -> true
+          _ -> false
+        end
+
+      if timeout? do
         {:error,
          %{
            type: :timeout,
