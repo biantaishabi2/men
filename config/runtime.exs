@@ -33,6 +33,16 @@ config :men, :runtime_bridge,
   max_concurrency: parse_positive_integer_env.("RUNTIME_BRIDGE_MAX_CONCURRENCY", 10),
   backpressure_strategy: :reject
 
+# 钉钉机器人回发配置（生产可直接由环境变量驱动）。
+dingtalk_webhook_url = System.get_env("DINGTALK_ROBOT_WEBHOOK_URL")
+
+if is_binary(dingtalk_webhook_url) and dingtalk_webhook_url != "" do
+  config :men, Men.Channels.Egress.DingtalkRobotAdapter,
+    webhook_url: dingtalk_webhook_url,
+    secret: System.get_env("DINGTALK_ROBOT_SECRET"),
+    sign_enabled: System.get_env("DINGTALK_ROBOT_SIGN_ENABLED") in ~w(true TRUE 1)
+end
+
 # ## Using releases
 #
 # If you use `mix release`, you need to explicitly enable the server

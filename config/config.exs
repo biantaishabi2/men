@@ -13,7 +13,7 @@ config :men,
 
 config :men, Men.Gateway.DispatchServer,
   bridge_adapter: Men.RuntimeBridge.GongCLI,
-  egress_adapter: Men.Gateway.DispatchServer.NoopEgress,
+  egress_adapter: Men.Channels.Egress.RouterAdapter,
   storage_adapter: :memory
 
 config :men, Men.Channels.Ingress.FeishuAdapter,

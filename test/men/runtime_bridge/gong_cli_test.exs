@@ -65,7 +65,9 @@ defmodule Men.RuntimeBridge.GongCLITest do
   end
 
   test "超时映射为 :timeout + CLI_TIMEOUT，并可追踪 run_id" do
-    Application.put_env(:men, :runtime_bridge,
+    Application.put_env(
+      :men,
+      :runtime_bridge,
       Application.get_env(:men, :runtime_bridge, [])
       |> Keyword.put(:timeout_ms, 80)
     )
@@ -90,7 +92,9 @@ defmodule Men.RuntimeBridge.GongCLITest do
   test "超时后子进程可被清理（无残留标识进程）" do
     run_id = "cleanup-#{System.unique_integer([:positive, :monotonic])}"
 
-    Application.put_env(:men, :runtime_bridge,
+    Application.put_env(
+      :men,
+      :runtime_bridge,
       Application.get_env(:men, :runtime_bridge, [])
       |> Keyword.put(:timeout_ms, 80)
     )
@@ -117,7 +121,9 @@ defmodule Men.RuntimeBridge.GongCLITest do
   end
 
   test "并发突增超过上限时快速返回 :overloaded" do
-    Application.put_env(:men, :runtime_bridge,
+    Application.put_env(
+      :men,
+      :runtime_bridge,
       Application.get_env(:men, :runtime_bridge, [])
       |> Keyword.put(:max_concurrency, 2)
       |> Keyword.put(:timeout_ms, 2_000)
@@ -155,7 +161,9 @@ defmodule Men.RuntimeBridge.GongCLITest do
   end
 
   test "外层 Task.shutdown/2 兜底路径可返回统一超时结构" do
-    Application.put_env(:men, :runtime_bridge,
+    Application.put_env(
+      :men,
+      :runtime_bridge,
       Application.get_env(:men, :runtime_bridge, [])
       |> Keyword.put(:timeout_ms, 20)
       |> Keyword.put(:outer_wait_buffer_ms, 0)
@@ -177,7 +185,9 @@ defmodule Men.RuntimeBridge.GongCLITest do
   end
 
   test "外层等待窗口覆盖清理时间时不应提前打断内层清理" do
-    Application.put_env(:men, :runtime_bridge,
+    Application.put_env(
+      :men,
+      :runtime_bridge,
       Application.get_env(:men, :runtime_bridge, [])
       |> Keyword.put(:timeout_ms, 20)
       |> Keyword.put(:outer_wait_buffer_ms, 0)
@@ -216,9 +226,14 @@ defmodule Men.RuntimeBridge.GongCLITest do
   end
 
   test "命令不存在时返回统一失败结构" do
-    Application.put_env(:men, :runtime_bridge,
+    Application.put_env(
+      :men,
+      :runtime_bridge,
       Application.get_env(:men, :runtime_bridge, [])
-      |> Keyword.put(:command, "men_missing_cli_#{System.unique_integer([:positive, :monotonic])}")
+      |> Keyword.put(
+        :command,
+        "men_missing_cli_#{System.unique_integer([:positive, :monotonic])}"
+      )
     )
 
     result =
@@ -237,12 +252,17 @@ defmodule Men.RuntimeBridge.GongCLITest do
 
   test "不可执行命令路径返回统一失败结构" do
     script_path =
-      Path.join(System.tmp_dir!(), "men_fake_non_exec_#{System.unique_integer([:positive, :monotonic])}.sh")
+      Path.join(
+        System.tmp_dir!(),
+        "men_fake_non_exec_#{System.unique_integer([:positive, :monotonic])}.sh"
+      )
 
     File.write!(script_path, "#!/usr/bin/env bash\necho should_not_run\n")
     File.chmod!(script_path, 0o644)
 
-    Application.put_env(:men, :runtime_bridge,
+    Application.put_env(
+      :men,
+      :runtime_bridge,
       Application.get_env(:men, :runtime_bridge, [])
       |> Keyword.put(:command, script_path)
     )
@@ -261,6 +281,54 @@ defmodule Men.RuntimeBridge.GongCLITest do
     assert error.details.exit_code == 127
   end
 
+  test "支持 gong run <prompt> 位置参数模式" do
+    script = build_fake_positional_cli_script()
+
+    Application.put_env(:men, :runtime_bridge,
+      command: script,
+      command_args: ["run"],
+      prompt_arg: nil,
+      prompt_as_positional: true,
+      request_id_arg: nil,
+      session_key_arg: nil,
+      run_id_arg: nil,
+      timeout_ms: 300,
+      max_concurrency: 10,
+      backpressure_strategy: :reject
+    )
+
+    result =
+      GongCLI.start_turn("hello-positional", %{
+        request_id: "req-positional",
+        session_key: "sess-positional",
+        run_id: "run-positional"
+      })
+
+    assert {:ok, payload} = result
+    assert String.contains?(payload.text, "positional:hello-positional")
+  end
+
+  test "command 名为 gong 时默认不注入 request/session/run flags" do
+    script = build_fake_named_gong_script()
+
+    Application.put_env(:men, :runtime_bridge,
+      command: script,
+      timeout_ms: 300,
+      max_concurrency: 10,
+      backpressure_strategy: :reject
+    )
+
+    result =
+      GongCLI.start_turn("hello-default-gong", %{
+        request_id: "req-default-gong",
+        session_key: "sess-default-gong",
+        run_id: "run-default-gong"
+      })
+
+    assert {:ok, payload} = result
+    assert String.contains?(payload.text, "named-gong:hello-default-gong")
+  end
+
   defp reset_counter do
     case :ets.info(:men_runtime_bridge_counter) do
       :undefined -> :ok
@@ -269,7 +337,8 @@ defmodule Men.RuntimeBridge.GongCLITest do
   end
 
   defp build_fake_cli_script do
-    script_path = Path.join(System.tmp_dir!(), "men_fake_gong_cli_#{System.unique_integer([:positive])}.sh")
+    script_path =
+      Path.join(System.tmp_dir!(), "men_fake_gong_cli_#{System.unique_integer([:positive])}.sh")
 
     content = """
     #!/usr/bin/env bash
@@ -325,6 +394,67 @@ defmodule Men.RuntimeBridge.GongCLITest do
         exit 0
         ;;
     esac
+    """
+
+    File.write!(script_path, content)
+    File.chmod!(script_path, 0o755)
+    script_path
+  end
+
+  defp build_fake_positional_cli_script do
+    script_path =
+      Path.join(
+        System.tmp_dir!(),
+        "men_fake_gong_positional_#{System.unique_integer([:positive])}.sh"
+      )
+
+    content = """
+    #!/usr/bin/env bash
+    set -eu
+
+    if [ "$#" -lt 2 ]; then
+      echo "invalid args" >&2
+      exit 2
+    fi
+
+    if [ "$1" != "run" ]; then
+      echo "missing run" >&2
+      exit 2
+    fi
+
+    prompt="$2"
+    echo "positional:${prompt}"
+    exit 0
+    """
+
+    File.write!(script_path, content)
+    File.chmod!(script_path, 0o755)
+    script_path
+  end
+
+  defp build_fake_named_gong_script do
+    dir =
+      Path.join(System.tmp_dir!(), "men_fake_named_gong_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(dir)
+    script_path = Path.join(dir, "gong")
+
+    content = """
+    #!/usr/bin/env bash
+    set -eu
+
+    if [ "$#" -ne 2 ]; then
+      echo "expected exactly 2 args: run <prompt>" >&2
+      exit 2
+    fi
+
+    if [ "$1" != "run" ]; then
+      echo "missing run command" >&2
+      exit 2
+    fi
+
+    echo "named-gong:$2"
+    exit 0
     """
 
     File.write!(script_path, content)
