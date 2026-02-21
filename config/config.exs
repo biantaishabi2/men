@@ -16,6 +16,15 @@ config :men, Men.Gateway.DispatchServer,
   egress_adapter: Men.Gateway.DispatchServer.NoopEgress,
   storage_adapter: :memory
 
+config :men, Men.Channels.Ingress.FeishuAdapter,
+  sign_mode: :strict,
+  replay_backend: Men.Channels.Ingress.FeishuAdapter.ReplayBackend.ETS,
+  bots: %{}
+
+config :men, Men.Channels.Egress.FeishuAdapter,
+  base_url: "https://open.feishu.cn",
+  bots: %{}
+
 # Configures the endpoint
 config :men, MenWeb.Endpoint,
   url: [host: "localhost"],
