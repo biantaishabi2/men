@@ -23,6 +23,7 @@ defmodule MenWeb.Router do
   scope "/webhooks", MenWeb.Webhooks do
     pipe_through :api
 
+    post "/feishu", FeishuController, :create
     post "/dingtalk", DingtalkController, :callback
   end
 
