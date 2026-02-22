@@ -246,6 +246,7 @@ defmodule Men.Gateway.Runtime.FrameSnapshotBuilder do
     |> read(key, [])
     |> List.wrap()
     |> Enum.filter(&is_binary/1)
+    |> Enum.reject(&(String.trim(&1) == ""))
   end
 
   defp normalize_text(value) when is_binary(value), do: String.trim(value)

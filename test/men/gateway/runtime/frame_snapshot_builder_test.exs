@@ -103,4 +103,16 @@ defmodule Men.Gateway.Runtime.FrameSnapshotBuilderTest do
     assert snapshot.state_ref == %{event_id: "e-1", node_id: "n-1"}
     assert snapshot.debug_info == %{event_ids: ["e-1", "e-2"], node_ids: ["n-1"]}
   end
+
+  test "空字符串与空白引用不会进入 state_ref 或 debug_info" do
+    runtime_state = %{
+      event_ids: ["", "   ", "e-1"],
+      node_ids: [nil, "\t", "n-1"]
+    }
+
+    snapshot = FrameSnapshotBuilder.build(runtime_state, debug: true)
+
+    assert snapshot.state_ref == %{event_id: "e-1", node_id: "n-1"}
+    assert snapshot.debug_info == %{event_ids: ["e-1"], node_ids: ["n-1"]}
+  end
 end
