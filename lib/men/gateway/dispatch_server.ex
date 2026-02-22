@@ -41,7 +41,6 @@ defmodule Men.Gateway.DispatchServer do
           mode_transition_suppression_window_ticks: non_neg_integer(),
           mode_transition_suppression_limit: non_neg_integer(),
           mode_transition_recovery_ticks: non_neg_integer(),
-          mode_backfill_dedup_keys: MapSet.t(),
           run_terminal_limit: pos_integer(),
           run_terminal_order: :queue.queue(binary()),
           session_last_context: %{optional(binary()) => Types.run_context()},
@@ -196,7 +195,6 @@ defmodule Men.Gateway.DispatchServer do
           :mode_transition_recovery_ticks,
           Keyword.get(config, :mode_transition_recovery_ticks, 6)
         ),
-      mode_backfill_dedup_keys: MapSet.new(),
       run_terminal_limit:
         Keyword.get(opts, :run_terminal_limit, Keyword.get(config, :run_terminal_limit, 1_000)),
       run_terminal_order: :queue.new(),
@@ -441,8 +439,7 @@ defmodule Men.Gateway.DispatchServer do
     transition_id = new_transition_id()
     backfill_tasks = maybe_build_backfill_tasks(snapshot, decision_meta, transition_id)
 
-    {inserted_backfill_tasks, mode_backfill_dedup_keys} =
-      dedup_backfill_tasks(backfill_tasks, state.mode_backfill_dedup_keys)
+    inserted_backfill_tasks = dedup_backfill_tasks(backfill_tasks)
 
     queued_backfill_tasks = enqueue_backfill_tasks(inserted_backfill_tasks, state.inbox_store_opts)
 
@@ -465,7 +462,7 @@ defmodule Men.Gateway.DispatchServer do
       send(state.rebuild_notify_pid, {:mode_transitioned, transition_event})
     end
 
-    %{state | mode_backfill_dedup_keys: mode_backfill_dedup_keys}
+    state
   end
 
   # execute 回退 research 时只针对失效前提相关关键路径补链。
@@ -510,10 +507,11 @@ defmodule Men.Gateway.DispatchServer do
 
   defp maybe_build_backfill_tasks(_snapshot, _meta, _transition_id), do: []
 
-  # 幂等键采用 {transition_id, premise_id}，避免同一迁移重复入队。
-  defp dedup_backfill_tasks(tasks, dedup_keys) do
-    Enum.reduce(tasks, {[], dedup_keys}, fn task, {acc, keys} ->
-      dedup_key = {task.transition_id, task.premise_id}
+  # 在单次迁移内按 {transition_id, premise_id, critical_path} 去重，
+  # 既消除重复 premise 输入，又保留同一 premise 的多关键路径补链。
+  defp dedup_backfill_tasks(tasks) do
+    Enum.reduce(tasks, {[], MapSet.new()}, fn task, {acc, keys} ->
+      dedup_key = {task.transition_id, task.premise_id, task.critical_path}
 
       if MapSet.member?(keys, dedup_key) do
         {acc, keys}
@@ -521,7 +519,7 @@ defmodule Men.Gateway.DispatchServer do
         {[task | acc], MapSet.put(keys, dedup_key)}
       end
     end)
-    |> then(fn {inserted, keys} -> {Enum.reverse(inserted), keys} end)
+    |> then(fn {inserted, _keys} -> Enum.reverse(inserted) end)
   end
 
   defp enqueue_backfill_tasks(tasks, inbox_store_opts) do
@@ -551,21 +549,27 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   defp build_backfill_envelope(task) do
+    critical_path_key = backfill_critical_path_key(task.critical_path)
+
     %EventEnvelope{
       type: "mode_backfill",
       source: "mode_state_machine",
       target: "runtime",
-      event_id: "#{task.transition_id}:#{task.premise_id}",
+      event_id: "#{task.transition_id}:#{task.premise_id}:#{critical_path_key}",
       version: 0,
       wake: false,
       inbox_only: true,
       force_wake: false,
-      ets_keys: ["mode_backfill", task.transition_id, task.premise_id],
+      ets_keys: ["mode_backfill", task.transition_id, task.premise_id, critical_path_key],
       payload: task,
       ts: System.system_time(:millisecond),
       meta: %{transition_id: task.transition_id, premise_id: task.premise_id}
     }
   end
+
+  defp backfill_critical_path_key(nil), do: "__none__"
+  defp backfill_critical_path_key(path_id) when is_binary(path_id), do: path_id
+  defp backfill_critical_path_key(path_id), do: inspect(path_id)
 
   defp publish_mode_transition(topic, transition_event) do
     Phoenix.PubSub.broadcast(Men.PubSub, topic, {:mode_transitioned, transition_event})

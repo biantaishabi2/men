@@ -112,14 +112,32 @@ defmodule Men.Gateway.DispatchServerModeSwitchTest do
     assert transition.from_mode == :execute
     assert transition.to_mode == :research
     assert transition.reason == :premise_invalidated
-    assert length(transition.inserted_backfill_tasks) == 1
+    assert length(transition.inserted_backfill_tasks) == 2
 
-    [task] = transition.inserted_backfill_tasks
-    assert task.transition_id == transition.transition_id
-    assert task.premise_id == "premise-1"
+    assert Enum.map(transition.inserted_backfill_tasks, & &1.transition_id) ==
+             [transition.transition_id, transition.transition_id]
+
+    assert Enum.map(transition.inserted_backfill_tasks, & &1.premise_id) == ["premise-1", "premise-1"]
+    assert Enum.map(transition.inserted_backfill_tasks, & &1.critical_path) == ["path-a", "path-b"]
 
     assert {:ok, envelope} =
-             InboxStore.latest_by_ets_keys(["mode_backfill", transition.transition_id, "premise-1"])
+             InboxStore.latest_by_ets_keys([
+               "mode_backfill",
+               transition.transition_id,
+               "premise-1",
+               "path-a"
+             ])
+
+    assert envelope.type == "mode_backfill"
+    assert envelope.payload.premise_id == "premise-1"
+
+    assert {:ok, envelope} =
+             InboxStore.latest_by_ets_keys([
+               "mode_backfill",
+               transition.transition_id,
+               "premise-1",
+               "path-b"
+             ])
 
     assert envelope.type == "mode_backfill"
     assert envelope.payload.premise_id == "premise-1"
@@ -213,12 +231,27 @@ defmodule Men.Gateway.DispatchServerModeSwitchTest do
     assert_receive {:mode_transitioned, transition}
     assert transition.from_mode == :execute
     assert transition.to_mode == :research
-    assert length(transition.inserted_backfill_tasks) == 1
+    assert length(transition.inserted_backfill_tasks) == 2
 
     refute_receive {:mode_transitioned, %{from_mode: :execute, to_mode: :research}}, 100
 
     assert {:ok, envelope} =
-             InboxStore.latest_by_ets_keys(["mode_backfill", transition.transition_id, "premise-c"])
+             InboxStore.latest_by_ets_keys([
+               "mode_backfill",
+               transition.transition_id,
+               "premise-c",
+               "path-a"
+             ])
+
+    assert envelope.payload.premise_id == "premise-c"
+
+    assert {:ok, envelope} =
+             InboxStore.latest_by_ets_keys([
+               "mode_backfill",
+               transition.transition_id,
+               "premise-c",
+               "path-b"
+             ])
 
     assert envelope.payload.premise_id == "premise-c"
 
