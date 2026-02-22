@@ -23,7 +23,6 @@ defmodule Men.Gateway.DispatchServer do
           session_rebuild_retry_enabled: boolean(),
           run_terminal_limit: pos_integer(),
           run_terminal_order: :queue.queue(binary()),
-          processed_run_ids: MapSet.t(binary()),
           session_last_context: %{optional(binary()) => Types.run_context()},
           run_terminal_results: %{optional(binary()) => terminal_reply()}
         }
@@ -83,7 +82,6 @@ defmodule Men.Gateway.DispatchServer do
       run_terminal_limit:
         Keyword.get(opts, :run_terminal_limit, Keyword.get(config, :run_terminal_limit, 1_000)),
       run_terminal_order: :queue.new(),
-      processed_run_ids: MapSet.new(),
       session_last_context: %{},
       run_terminal_results: %{}
     }
@@ -453,8 +451,7 @@ defmodule Men.Gateway.DispatchServer do
 
     %{
       next_state
-      | processed_run_ids: MapSet.put(state.processed_run_ids, context.run_id),
-        session_last_context: Map.put(state.session_last_context, context.session_key, run_context),
+      | session_last_context: Map.put(state.session_last_context, context.session_key, run_context),
         run_terminal_results: next_state.run_terminal_results,
         run_terminal_order: next_state.run_terminal_order
     }
