@@ -10,6 +10,7 @@ defmodule Men.Gateway.DispatchServer do
   alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
   alias Men.Gateway.EventEnvelope
   alias Men.Gateway.InboxStore
+  alias Men.Gateway.Runtime.ModeStateMachine
   alias Men.Gateway.SessionCoordinator
   alias Men.Gateway.Types
   alias Men.Gateway.WakePolicy
@@ -31,6 +32,16 @@ defmodule Men.Gateway.DispatchServer do
           inbox_store_opts: keyword(),
           rebuild_target: GenServer.server() | nil,
           rebuild_notify_pid: pid() | nil,
+          mode_state_machine_enabled: boolean(),
+          mode_state_machine: module(),
+          mode_state_machine_mode: ModeStateMachine.mode(),
+          mode_state_machine_context: ModeStateMachine.context(),
+          mode_state_machine_options: map(),
+          mode_transition_topic: binary(),
+          mode_transition_suppression_window_ticks: non_neg_integer(),
+          mode_transition_suppression_limit: non_neg_integer(),
+          mode_transition_recovery_ticks: non_neg_integer(),
+          mode_backfill_dedup_keys: MapSet.t(),
           run_terminal_limit: pos_integer(),
           run_terminal_order: :queue.queue(binary()),
           session_last_context: %{optional(binary()) => Types.run_context()},
@@ -130,6 +141,62 @@ defmodule Men.Gateway.DispatchServer do
       rebuild_target: Keyword.get(opts, :rebuild_target, Keyword.get(config, :rebuild_target)),
       rebuild_notify_pid:
         Keyword.get(opts, :rebuild_notify_pid, Keyword.get(config, :rebuild_notify_pid)),
+      mode_state_machine_enabled:
+        Keyword.get(
+          opts,
+          :mode_state_machine_enabled,
+          Keyword.get(config, :mode_state_machine_enabled, true)
+        ),
+      mode_state_machine:
+        Keyword.get(
+          opts,
+          :mode_state_machine,
+          Keyword.get(config, :mode_state_machine, ModeStateMachine)
+        ),
+      mode_state_machine_mode:
+        Keyword.get(
+          opts,
+          :mode_state_machine_mode,
+          Keyword.get(config, :mode_state_machine_mode, :research)
+        ),
+      mode_state_machine_context:
+        Keyword.get(
+          opts,
+          :mode_state_machine_context,
+          Keyword.get(config, :mode_state_machine_context, ModeStateMachine.initial_context())
+        ),
+      mode_state_machine_options:
+        opts
+        |> Keyword.get(
+          :mode_state_machine_options,
+          Keyword.get(config, :mode_state_machine_options, %{})
+        )
+        |> normalize_overrides(),
+      mode_transition_topic:
+        Keyword.get(
+          opts,
+          :mode_transition_topic,
+          Keyword.get(config, :mode_transition_topic, "mode_transitions")
+        ),
+      mode_transition_suppression_window_ticks:
+        Keyword.get(
+          opts,
+          :mode_transition_suppression_window_ticks,
+          Keyword.get(config, :mode_transition_suppression_window_ticks, 8)
+        ),
+      mode_transition_suppression_limit:
+        Keyword.get(
+          opts,
+          :mode_transition_suppression_limit,
+          Keyword.get(config, :mode_transition_suppression_limit, 4)
+        ),
+      mode_transition_recovery_ticks:
+        Keyword.get(
+          opts,
+          :mode_transition_recovery_ticks,
+          Keyword.get(config, :mode_transition_recovery_ticks, 6)
+        ),
+      mode_backfill_dedup_keys: MapSet.new(),
       run_terminal_limit:
         Keyword.get(opts, :run_terminal_limit, Keyword.get(config, :run_terminal_limit, 1_000)),
       run_terminal_order: :queue.new(),
@@ -336,8 +403,155 @@ defmodule Men.Gateway.DispatchServer do
     |> Map.put(:inbox_only, true)
   end
 
+  # 每轮调度先做模式状态机决策，再进入 runtime bridge。
+  defp maybe_run_mode_state_machine(%{mode_state_machine_enabled: false} = state, _inbound_event),
+    do: state
+
+  defp maybe_run_mode_state_machine(state, inbound_event) do
+    snapshot = extract_mode_snapshot(inbound_event)
+
+    machine_overrides =
+      state.mode_state_machine_options
+      |> Map.put_new(:churn_window_ticks, state.mode_transition_suppression_window_ticks)
+      |> Map.put_new(:churn_max_transitions, state.mode_transition_suppression_limit)
+      |> Map.put_new(:research_only_recovery_ticks, state.mode_transition_recovery_ticks)
+
+    {next_mode, next_context, decision_meta} =
+      state.mode_state_machine.decide(
+        state.mode_state_machine_mode,
+        snapshot,
+        state.mode_state_machine_context,
+        machine_overrides
+      )
+
+    base_state = %{
+      state
+      | mode_state_machine_mode: next_mode,
+        mode_state_machine_context: next_context
+    }
+
+    if decision_meta.transition? do
+      finalize_mode_transition(base_state, snapshot, decision_meta)
+    else
+      base_state
+    end
+  end
+
+  defp finalize_mode_transition(state, snapshot, decision_meta) do
+    transition_id = new_transition_id()
+    backfill_tasks = maybe_build_backfill_tasks(snapshot, decision_meta, transition_id)
+
+    {inserted_backfill_tasks, mode_backfill_dedup_keys} =
+      dedup_backfill_tasks(backfill_tasks, state.mode_backfill_dedup_keys)
+
+    transition_event = %{
+      transition_id: transition_id,
+      from_mode: decision_meta.from_mode,
+      to_mode: decision_meta.to_mode,
+      reason: decision_meta.reason,
+      priority: decision_meta.priority,
+      tick: decision_meta.tick,
+      snapshot_digest: snapshot_digest(snapshot),
+      hysteresis_state: decision_meta.hysteresis_state,
+      cooldown_remaining: decision_meta.cooldown_remaining,
+      inserted_backfill_tasks: inserted_backfill_tasks
+    }
+
+    publish_mode_transition(state.mode_transition_topic, transition_event)
+
+    if is_pid(state.rebuild_notify_pid) do
+      send(state.rebuild_notify_pid, {:mode_transitioned, transition_event})
+    end
+
+    %{state | mode_backfill_dedup_keys: mode_backfill_dedup_keys}
+  end
+
+  # execute 回退 research 时只针对失效前提相关关键路径补链。
+  defp maybe_build_backfill_tasks(
+         snapshot,
+         %{from_mode: :execute, to_mode: :research} = meta,
+         transition_id
+       ) do
+    reason = meta.reason
+
+    if reason in [:premise_invalidated, :external_mutation, :info_insufficient] do
+      premise_ids =
+        snapshot
+        |> Map.get(:invalidated_premise_ids, [])
+        |> List.wrap()
+        |> Enum.filter(&is_binary/1)
+
+      critical_paths_by_premise =
+        snapshot
+        |> Map.get(:critical_paths_by_premise, %{})
+        |> normalize_overrides()
+
+      Enum.flat_map(premise_ids, fn premise_id ->
+        critical_paths = Map.get(critical_paths_by_premise, premise_id, [])
+
+        if critical_paths == [] do
+          [%{transition_id: transition_id, premise_id: premise_id, critical_path: nil}]
+        else
+          Enum.map(critical_paths, fn path_id ->
+            %{
+              transition_id: transition_id,
+              premise_id: premise_id,
+              critical_path: path_id
+            }
+          end)
+        end
+      end)
+    else
+      []
+    end
+  end
+
+  defp maybe_build_backfill_tasks(_snapshot, _meta, _transition_id), do: []
+
+  # 幂等键采用 {transition_id, premise_id}，避免同一迁移重复入队。
+  defp dedup_backfill_tasks(tasks, dedup_keys) do
+    Enum.reduce(tasks, {[], dedup_keys}, fn task, {acc, keys} ->
+      dedup_key = {task.transition_id, task.premise_id}
+
+      if MapSet.member?(keys, dedup_key) do
+        {acc, keys}
+      else
+        {[task | acc], MapSet.put(keys, dedup_key)}
+      end
+    end)
+    |> then(fn {inserted, keys} -> {Enum.reverse(inserted), keys} end)
+  end
+
+  defp publish_mode_transition(topic, transition_event) do
+    Phoenix.PubSub.broadcast(Men.PubSub, topic, {:mode_transitioned, transition_event})
+  rescue
+    error ->
+      Logger.warning("mode transition publish failed error=#{inspect(error)}")
+      :ok
+  end
+
+  defp extract_mode_snapshot(%{} = inbound_event) do
+    inbound_event
+    |> Map.get(:mode_signals, %{})
+    |> normalize_overrides()
+  end
+
+  defp extract_mode_snapshot(_), do: %{}
+
+  defp snapshot_digest(snapshot) do
+    snapshot
+    |> :erlang.phash2()
+    |> Integer.to_string()
+  end
+
+  defp new_transition_id do
+    "mode-transition-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+  end
+
   defp run_dispatch(state, inbound_event) do
     with {:ok, context} <- normalize_event(inbound_event) do
+      state = maybe_run_mode_state_machine(state, inbound_event)
+
       case fetch_terminal_result(state, context.run_id) do
         {:ok, cached_reply} ->
           {cached_reply, state}
