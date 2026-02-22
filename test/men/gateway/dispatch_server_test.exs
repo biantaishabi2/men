@@ -3,6 +3,7 @@ defmodule Men.Gateway.DispatchServerTest do
 
   alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
   alias Men.Gateway.DispatchServer
+  alias Men.Gateway.InboxStore
   alias Men.Gateway.SessionCoordinator
 
   defmodule MockBridge do
@@ -128,9 +129,27 @@ defmodule Men.Gateway.DispatchServerTest do
       session_coordinator_enabled: false
     ]
 
-    start_supervised!(
-      {DispatchServer,
-       Keyword.merge(default_opts, opts)}
+    start_supervised!({DispatchServer, Keyword.merge(default_opts, opts)})
+  end
+
+  defp start_event_coord_server(opts \\ []) do
+    tables = [
+      event_table: :"dispatch_event_table_#{System.unique_integer([:positive, :monotonic])}",
+      scope_table: :"dispatch_scope_table_#{System.unique_integer([:positive, :monotonic])}"
+    ]
+
+    InboxStore.reset(tables)
+
+    start_dispatch_server(
+      Keyword.merge(
+        [
+          event_coordination_enabled: true,
+          wake_enabled: true,
+          rebuild_notify_pid: self(),
+          inbox_store_opts: tables
+        ],
+        opts
+      )
     )
   end
 
@@ -247,8 +266,18 @@ defmodule Men.Gateway.DispatchServerTest do
     assert result1.session_key == "feishu:u400:t:t01"
     assert result2.session_key == "feishu:u400:t:t01"
 
-    assert_receive {:bridge_called, "turn-1", %{session_key: runtime_session_id_1, external_session_key: "feishu:u400:t:t01"}}
-    assert_receive {:bridge_called, "turn-2", %{session_key: runtime_session_id_2, external_session_key: "feishu:u400:t:t01"}}
+    assert_receive {:bridge_called, "turn-1",
+                    %{
+                      session_key: runtime_session_id_1,
+                      external_session_key: "feishu:u400:t:t01"
+                    }}
+
+    assert_receive {:bridge_called, "turn-2",
+                    %{
+                      session_key: runtime_session_id_2,
+                      external_session_key: "feishu:u400:t:t01"
+                    }}
+
     assert runtime_session_id_1 == runtime_session_id_2
   end
 
@@ -272,8 +301,12 @@ defmodule Men.Gateway.DispatchServerTest do
     assert {:ok, result} = DispatchServer.dispatch(server, event)
     assert result.run_id == "run-heal-1"
 
-    assert_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1", session_key: runtime_session_id_1}}
-    assert_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1", session_key: runtime_session_id_2}}
+    assert_receive {:bridge_called, "session_not_found_once",
+                    %{run_id: "run-heal-1", session_key: runtime_session_id_1}}
+
+    assert_receive {:bridge_called, "session_not_found_once",
+                    %{run_id: "run-heal-1", session_key: runtime_session_id_2}}
+
     assert runtime_session_id_1 != runtime_session_id_2
 
     assert_receive {:egress_called, "feishu:u-heal", %FinalMessage{}}
@@ -514,5 +547,102 @@ defmodule Men.Gateway.DispatchServerTest do
     assert error_result.code == "session_not_found"
     assert error_result.reason == "runtime session missing"
     assert_receive {:egress_called, "feishu:u-race-2", %ErrorMessage{code: "session_not_found"}}
+  end
+
+  describe "event coordination pipeline" do
+    test "agent_result 满足条件时写入 inbox 并触发一次 rebuild" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "agent_result",
+        source: "agent.1",
+        target: "control",
+        event_id: "E1",
+        version: 10,
+        wake: true,
+        inbox_only: false,
+        ets_keys: ["agent.1", "task.1"],
+        payload: %{result: "ok"}
+      }
+
+      assert {:ok, result} = DispatchServer.coordinate_event(server, event)
+      assert result.store_result == :ok
+      assert result.rebuild_triggered == true
+      assert_receive {:frame_rebuild_triggered, envelope}
+      assert envelope.event_id == "E1"
+    end
+
+    test "heartbeat 仅入 inbox 不触发 rebuild" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "heartbeat",
+        source: "agent.1",
+        target: "control",
+        event_id: "E2",
+        version: 1,
+        wake: false,
+        inbox_only: true,
+        ets_keys: ["agent.1", "hb"]
+      }
+
+      assert {:ok, result} = DispatchServer.coordinate_event(server, event)
+      assert result.store_result == :ok
+      assert result.rebuild_triggered == false
+      refute_receive {:frame_rebuild_triggered, _}
+    end
+
+    test "重复 event_id 仅首次触发 rebuild" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "agent_result",
+        source: "agent.1",
+        target: "control",
+        event_id: "E3",
+        version: 10,
+        wake: true,
+        inbox_only: false,
+        ets_keys: ["agent.1", "task.2"]
+      }
+
+      assert {:ok, first} = DispatchServer.coordinate_event(server, event)
+      assert first.store_result == :ok
+      assert first.rebuild_triggered == true
+      assert_receive {:frame_rebuild_triggered, _}
+
+      assert {:ok, second} = DispatchServer.coordinate_event(server, event)
+      assert second.store_result == :duplicate
+      assert second.rebuild_triggered == false
+      refute_receive {:frame_rebuild_triggered, _}
+    end
+
+    test "feature flag 关闭时降级为 inbox_only，不触发 rebuild" do
+      server =
+        start_event_coord_server(
+          event_coordination_enabled: false,
+          wake_enabled: true,
+          wake_policy_strict_inbox_priority: false
+        )
+
+      event = %{
+        type: "agent_result",
+        source: "agent.1",
+        target: "control",
+        event_id: "E4",
+        version: 10,
+        wake: true,
+        inbox_only: false,
+        force_wake: true,
+        ets_keys: ["agent.1", "task.3"]
+      }
+
+      assert {:ok, result} = DispatchServer.coordinate_event(server, event)
+      assert result.store_result == :ok
+      assert result.rebuild_triggered == false
+      assert result.envelope.inbox_only == true
+      assert result.envelope.wake == false
+      refute_receive {:frame_rebuild_triggered, _}
+    end
   end
 end
