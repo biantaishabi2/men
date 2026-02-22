@@ -1,6 +1,7 @@
 defmodule Men.Channels.Egress.RouterAdapterTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
+  alias Men.Channels.Egress.DingtalkCardAdapter
   alias Men.Channels.Egress.DingtalkRobotAdapter
   alias Men.Channels.Egress.Messages.FinalMessage
   alias Men.Channels.Egress.RouterAdapter
@@ -24,15 +25,19 @@ defmodule Men.Channels.Egress.RouterAdapterTest do
   end
 
   setup do
+    original_card_cfg = Application.get_env(:men, DingtalkCardAdapter, [])
+
     Application.put_env(:men, :router_adapter_test_pid, self())
     Application.put_env(:men, DingtalkRobotAdapter,
       transport: MockTransport,
       webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=config-token"
     )
+    Application.put_env(:men, DingtalkCardAdapter, Keyword.put(original_card_cfg, :enabled, false))
 
     on_exit(fn ->
       Application.delete_env(:men, :router_adapter_test_pid)
       Application.delete_env(:men, DingtalkRobotAdapter)
+      Application.put_env(:men, DingtalkCardAdapter, original_card_cfg)
     end)
 
     :ok

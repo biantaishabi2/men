@@ -11,6 +11,7 @@ runtime_bridge_impl =
   case System.get_env("RUNTIME_BRIDGE_IMPL") do
     "mock" -> Men.RuntimeBridge.Mock
     "gong_rpc" -> Men.RuntimeBridge.GongRPC
+    "zcpg_rpc" -> Men.RuntimeBridge.ZcpgRPC
     _ -> Men.RuntimeBridge.GongCLI
   end
 
@@ -100,6 +101,12 @@ config :men, Men.RuntimeBridge.GongRPC,
   rpc_timeout_ms: parse_positive_integer_env.("GONG_RPC_TIMEOUT_MS", 30_000),
   completion_timeout_ms: parse_positive_integer_env.("GONG_RPC_COMPLETION_TIMEOUT_MS", 60_000),
   model: System.get_env("GONG_RPC_MODEL") || "deepseek:deepseek-chat"
+
+config :men, Men.RuntimeBridge.ZcpgRPC,
+  base_url: System.get_env("ZCPG_RPC_BASE_URL") || "http://127.0.0.1:4015",
+  path: System.get_env("ZCPG_RPC_PATH") || "/v1/runtime/bridge/prompt",
+  token: System.get_env("ZCPG_RPC_TOKEN"),
+  timeout: parse_positive_integer_env.("ZCPG_RPC_TIMEOUT_MS", 30_000)
 
 # 钉钉机器人回发配置（支持 webhook 与 app_robot 两种模式）。
 dingtalk_mode =

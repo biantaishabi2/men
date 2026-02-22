@@ -28,7 +28,8 @@ defmodule Men.RuntimeBridge.Bridge do
   @callback prompt(Request.t(), opts :: keyword()) :: result()
   @callback close(Request.t(), opts :: keyword()) :: result()
 
-  @callback call(Request.t(), opts :: keyword()) :: {:ok, Response.t()} | {:error, ErrorResponse.t()}
+  @callback call(Request.t(), opts :: keyword()) ::
+              {:ok, Response.t()} | {:error, ErrorResponse.t()}
   @callback start_turn(prompt :: binary(), context :: turn_context()) ::
               {:ok, %{text: binary(), meta: map()}} | {:error, map()}
 
@@ -77,7 +78,7 @@ defmodule Men.RuntimeBridge.Bridge do
             {:error, to_legacy_error_response(error, request)}
         end
 
-      function_exported?(adapter, :call, 2) ->
+      adapter_function_exported?(adapter, :call, 2) ->
         adapter.call(request, opts)
 
       true ->
@@ -105,7 +106,7 @@ defmodule Men.RuntimeBridge.Bridge do
         |> prompt(opts)
         |> to_legacy_start_turn_result(prompt_text, context_map)
 
-      function_exported?(adapter, :start_turn, 2) ->
+      adapter_function_exported?(adapter, :start_turn, 2) ->
         adapter.start_turn(prompt_text, context_map)
 
       true ->
@@ -126,12 +127,12 @@ defmodule Men.RuntimeBridge.Bridge do
     adapter = resolve_adapter(opts)
 
     cond do
-      function_exported?(adapter, action, 2) ->
+      adapter_function_exported?(adapter, action, 2) ->
         adapter
         |> apply(action, [request, opts])
         |> normalize_result(request)
 
-      action == :prompt and function_exported?(adapter, :start_turn, 2) ->
+      action == :prompt and adapter_function_exported?(adapter, :start_turn, 2) ->
         request
         |> prompt_to_legacy_context()
         |> then(fn {prompt_text, context} ->
@@ -163,12 +164,25 @@ defmodule Men.RuntimeBridge.Bridge do
   defp normalize_result({:error, %Error{} = error}, _request), do: {:error, error}
 
   defp normalize_result({:error, %ErrorResponse{} = error}, _request) do
+    details =
+      (error.metadata || %{})
+      |> ensure_map()
+      |> Map.put(:session_key, error.session_key)
+
+    {code, retryable} =
+      normalize_error_semantics(
+        error.code,
+        map_get_any(details, [:type, "type"]),
+        error.reason,
+        details
+      )
+
     {:error,
      %Error{
-       code: normalize_code(error.code || :runtime_error),
+       code: code,
        message: error.reason,
-       retryable: retryable?(error.code),
-       context: Map.put(error.metadata || %{}, :session_key, error.session_key)
+       retryable: retryable,
+       context: details
      }}
   end
 
@@ -193,15 +207,23 @@ defmodule Men.RuntimeBridge.Bridge do
      }}
   end
 
-  defp normalize_start_turn_result({:error, error_payload}, _request) when is_map(error_payload) do
-    code = error_payload |> Map.get(:code, :runtime_error) |> normalize_code()
+  defp normalize_start_turn_result({:error, error_payload}, _request)
+       when is_map(error_payload) do
+    details = error_payload |> map_get_any([:details, "details"]) |> ensure_map()
+    raw_code = Map.get(error_payload, :code, Map.get(error_payload, "code", :runtime_error))
+    raw_type = Map.get(error_payload, :type, Map.get(error_payload, "type"))
+
+    message =
+      Map.get(error_payload, :message, Map.get(error_payload, "message", "runtime bridge failed"))
+
+    {code, retryable} = normalize_error_semantics(raw_code, raw_type, message, details)
 
     {:error,
      %Error{
        code: code,
-       message: Map.get(error_payload, :message, "runtime bridge failed"),
-       retryable: retryable?(code),
-       context: Map.get(error_payload, :details, %{})
+       message: message,
+       retryable: retryable,
+       context: details
      }}
   end
 
@@ -230,15 +252,21 @@ defmodule Men.RuntimeBridge.Bridge do
   end
 
   defp to_legacy_start_turn_result({:error, %Error{} = error}, _prompt_text, context_map) do
+    error_type =
+      case normalize_code(error.code) do
+        :timeout -> :timeout
+        _ -> :failed
+      end
+
     {:error,
      %{
-       type: :failed,
+       type: error_type,
        code: Atom.to_string(error.code),
        message: error.message,
        run_id: Map.get(context_map, :run_id),
        request_id: Map.get(context_map, :request_id),
        session_key: Map.get(context_map, :session_key),
-       details: error.context
+       details: Map.put(error.context || %{}, :retryable, error.retryable)
      }}
   end
 
@@ -301,6 +329,10 @@ defmodule Men.RuntimeBridge.Bridge do
     timeout_ms || Keyword.get(opts, :timeout_ms) || runtime_config()[:timeout_ms]
   end
 
+  defp adapter_function_exported?(adapter, function_name, arity) do
+    Code.ensure_loaded?(adapter) and function_exported?(adapter, function_name, arity)
+  end
+
   defp runtime_config, do: Application.get_env(:men, :runtime_bridge, [])
   defp dispatch_server_config, do: Application.get_env(:men, Men.Gateway.DispatchServer, [])
 
@@ -313,6 +345,7 @@ defmodule Men.RuntimeBridge.Bridge do
     |> String.replace(~r/[^a-z0-9]+/, "_")
     |> case do
       "timeout" -> :timeout
+      "invalid_argument" -> :invalid_argument
       "session_not_found" -> :session_not_found
       "transport_error" -> :transport_error
       "runtime_error" -> :runtime_error
@@ -322,6 +355,125 @@ defmodule Men.RuntimeBridge.Bridge do
   end
 
   defp normalize_code(_), do: :runtime_error
+
+  # 统一错误语义优先级：timeout/504 > invalid_argument(400/422/契约) > 5xx > transport_error。
+  defp normalize_error_semantics(raw_code, raw_type, message, details) do
+    normalized_code = normalize_code(raw_code || :runtime_error)
+    normalized_type = normalize_code(raw_type || :runtime_error)
+    normalized_details = ensure_map(details)
+    status = extract_status(normalized_details)
+    normalized_message = normalize_message(message)
+
+    code =
+      cond do
+        timeout_semantic?(normalized_type, normalized_code, status, normalized_message) ->
+          :timeout
+
+        invalid_argument_semantic?(
+          normalized_code,
+          status,
+          normalized_message,
+          normalized_details
+        ) ->
+          :invalid_argument
+
+        status in 500..599 ->
+          :runtime_error
+
+        normalized_code == :transport_error ->
+          :transport_error
+
+        true ->
+          normalized_code
+      end
+
+    {code, resolve_retryable(code, normalized_details, status)}
+  end
+
+  defp timeout_semantic?(normalized_type, normalized_code, status, normalized_message) do
+    normalized_type == :timeout or normalized_code == :timeout or status == 504 or
+      String.contains?(normalized_message, "timeout")
+  end
+
+  defp invalid_argument_semantic?(normalized_code, status, normalized_message, details) do
+    normalized_code == :invalid_argument or status in [400, 422] or
+      contract_defect?(normalized_message, details)
+  end
+
+  defp contract_defect?(normalized_message, details) do
+    message_hit? =
+      Enum.any?(
+        ["invalid json", "missing text", "must be map", "invalid argument", "unprocessable"],
+        &String.contains?(normalized_message, &1)
+      )
+
+    detail_hit? =
+      Enum.any?(
+        [:contract_error, :invalid_json, :invalid_body, :missing_text, :invalid_meta],
+        fn key -> map_get_any(details, [key, Atom.to_string(key)]) == true end
+      )
+
+    message_hit? or detail_hit?
+  end
+
+  defp resolve_retryable(code, details, status) do
+    case map_get_any(details, [:retryable, "retryable"]) do
+      value when is_boolean(value) ->
+        value
+
+      _ ->
+        cond do
+          code == :timeout -> true
+          code == :invalid_argument -> false
+          code == :runtime_error and status in 500..599 -> true
+          true -> retryable?(code)
+        end
+    end
+  end
+
+  defp extract_status(details) do
+    [:status, "status", :status_code, "status_code", :http_status, "http_status"]
+    |> Enum.find_value(fn key ->
+      case Map.get(details, key) do
+        value when is_integer(value) and value >= 100 and value <= 599 ->
+          value
+
+        value when is_binary(value) ->
+          case Integer.parse(value) do
+            {parsed, ""} when parsed >= 100 and parsed <= 599 -> parsed
+            _ -> nil
+          end
+
+        _ ->
+          nil
+      end
+    end)
+  end
+
+  defp map_get_any(map, keys) when is_map(map) do
+    Enum.reduce_while(keys, nil, fn key, _acc ->
+      case Map.fetch(map, key) do
+        {:ok, value} -> {:halt, value}
+        :error -> {:cont, nil}
+      end
+    end)
+  end
+
+  defp map_get_any(_map, _keys), do: nil
+
+  defp ensure_map(value) when is_map(value), do: value
+  defp ensure_map(_value), do: %{}
+
+  defp normalize_message(nil), do: ""
+  defp normalize_message(value) when is_binary(value), do: String.downcase(value)
+
+  defp normalize_message(value) when is_atom(value),
+    do: value |> Atom.to_string() |> String.downcase()
+
+  defp normalize_message(value) when is_number(value),
+    do: value |> to_string() |> String.downcase()
+
+  defp normalize_message(value), do: value |> inspect() |> String.downcase()
 
   defp retryable?(code) do
     normalize_code(code) in [:timeout, :session_not_found, :transport_error]
