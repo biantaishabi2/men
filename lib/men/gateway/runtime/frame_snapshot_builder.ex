@@ -220,8 +220,8 @@ defmodule Men.Gateway.Runtime.FrameSnapshotBuilder do
 
   # 始终保留最小可追溯引用，避免 frame 与 runtime 状态脱节。
   defp extract_state_ref(runtime_state) do
-    event_id = runtime_state |> read(:event_ids, []) |> List.wrap() |> List.first()
-    node_id = runtime_state |> read(:node_ids, []) |> List.wrap() |> List.first()
+    event_id = runtime_state |> extract_ref_ids(:event_ids) |> List.first()
+    node_id = runtime_state |> extract_ref_ids(:node_ids) |> List.first()
 
     %{}
     |> maybe_put(:event_id, event_id)
@@ -232,13 +232,20 @@ defmodule Men.Gateway.Runtime.FrameSnapshotBuilder do
 
   # debug 打开时回传完整引用集合，便于离线诊断。
   defp build_debug_info(runtime_state, true) do
-    event_ids = runtime_state |> read(:event_ids, []) |> List.wrap() |> Enum.filter(&is_binary/1)
-    node_ids = runtime_state |> read(:node_ids, []) |> List.wrap() |> Enum.filter(&is_binary/1)
+    event_ids = extract_ref_ids(runtime_state, :event_ids)
+    node_ids = extract_ref_ids(runtime_state, :node_ids)
 
     %{
       event_ids: event_ids,
       node_ids: node_ids
     }
+  end
+
+  defp extract_ref_ids(runtime_state, key) do
+    runtime_state
+    |> read(key, [])
+    |> List.wrap()
+    |> Enum.filter(&is_binary/1)
   end
 
   defp normalize_text(value) when is_binary(value), do: String.trim(value)
