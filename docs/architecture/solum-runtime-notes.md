@@ -568,3 +568,71 @@ runtime_state:
 说明：
 1. `version` 与 ETS 快照版本对齐，避免乱序消费。
 2. 主 Agent 处理事件时按 `version` 去重与重放保护。
+
+### 6. 协作场景落地（主/子 Agent 通信）
+
+以“主 Agent 派发子任务 -> 子 Agent 回流结果”为例，事件协作建议如下：
+
+1. 主 Agent 订阅：
+- `agent:*:result`（子 Agent 完成结果）
+- `agent:*:error`（子 Agent 执行失败）
+- `agent:*:heartbeat`（长任务进度心跳，可选）
+- `data:updated`（共享证据区更新）
+
+2. 子 Agent 订阅：
+- `agent:<id>:task_assigned`（任务派发）
+- `agent:<id>:control_patch`（约束更新：预算/边界/技能白名单）
+- `agent:<id>:cancel`（取消任务）
+
+3. 通信内容（事件 + ETS 双写）
+- 事件负责通知（低负载、快速触发）
+- 详细内容写 ETS（可恢复、可检索、可审计）
+- 主 Agent 收到事件后，以事件中的 key 去 ETS 拉详情
+
+建议流程：
+1. 主 Agent 写 `agent.<id>.data.task.<task_ref>` 到 ETS
+2. 发布 `agent:<id>:task_assigned`
+3. 子 Agent 执行并持续写 `agent.<id>.data.progress.*`
+4. 子 Agent 完成后写 `agent.<id>.data.result.<task_ref>`，发布 `agent:<id>:result`
+5. 主 Agent 收到 result 事件后重建 frame 并更新控制流
+
+### 7. 唤醒策略（Wake vs Inbox-only）
+
+不是所有事件都触发推理。建议明确两类：
+
+1. `wake=true`（触发主 Agent 推理）
+- `agent:*:result`
+- `agent:*:error`
+- `policy_changed`
+- `external_critical_event`
+
+2. `wake=false`（仅入 Inbox/ETS，不立即推理）
+- `agent:*:heartbeat`
+- `tool_progress`
+- `telemetry_update`
+
+最小规则：
+1. 事件先入 ETS inbox。
+2. 再按事件类型/优先级/节流策略判定是否唤醒。
+3. 即使不唤醒，后续 frame 构建也能看到该事件。
+
+### 8. 事件信封扩展字段（建议）
+
+```elixir
+%{
+  type: :agent_result,
+  source: "agent:a1",
+  target: "agent:main",
+  task_ref: "t_123",
+  wake: true,
+  priority: :high,
+  inbox_only: false,
+  ets_keys: ["agent.a1.data.result.t_123"],
+  ts: 1_708_000_000_000
+}
+```
+
+说明：
+1. `wake` 决定是否触发推理调度。
+2. `inbox_only=true` 时只写入 inbox，不触发调度。
+3. `ets_keys` 指向详细数据位置，事件体保持轻量。
