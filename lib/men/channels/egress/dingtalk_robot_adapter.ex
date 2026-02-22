@@ -169,9 +169,9 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
       |> normalize_error_code()
 
     reason =
-      payload_value(message.payload, :reason) ||
-        payload_value(message.payload, :message) ||
-        "dispatch failed"
+      (payload_value(message.payload, :reason) ||
+         payload_value(message.payload, :message) ||
+         "dispatch failed")
       |> stringify_error_field("dispatch failed")
 
     prefix = if code == "", do: "[ERROR]", else: "[ERROR][#{code}]"
