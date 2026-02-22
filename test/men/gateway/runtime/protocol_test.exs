@@ -38,11 +38,17 @@ defmodule Men.Gateway.Runtime.ProtocolTest do
     assert validated.status == "pending"
     assert validated.version == 1
     assert validated.meta == %{}
+    refute Map.has_key?(validated, :requires_all)
+    refute Map.has_key?(validated, :options)
+    refute Map.has_key?(validated, :confidence)
 
     assert {:ok, encoded} = Protocol.encode(input)
     assert encoded["status"] == "pending"
     assert encoded["version"] == 1
     assert encoded["meta"] == %{}
+    refute Map.has_key?(encoded, "requires_all")
+    refute Map.has_key?(encoded, "options")
+    refute Map.has_key?(encoded, "confidence")
 
     assert {:ok, decoded} = Protocol.decode(input)
     assert decoded.status == "pending"
@@ -108,6 +114,14 @@ defmodule Men.Gateway.Runtime.ProtocolTest do
     assert decoded.mode == "plan"
     assert decoded.status == "draft"
     assert decoded.inserted_at == "2026-02-22T00:00:00Z"
+  end
+
+  test "legacy nil 字段先映射再校验" do
+    input = %{"id" => "n6-nil", "mode" => "research", "state" => nil}
+
+    assert {:error, [err]} = Protocol.decode(input)
+    assert err.code == :invalid_value
+    assert err.path == [:status]
   end
 
   test "edge 协议字段与未知字段校验" do

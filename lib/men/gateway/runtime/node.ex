@@ -80,10 +80,18 @@ defmodule Men.Gateway.Runtime.Node do
        node
        |> Map.put_new(:version, 1)
        |> normalize_nullable_map(:meta, %{})
-       |> normalize_nullable_list(:requires_all, [])
-       |> normalize_nullable_map(:options, %{})}
+       |> normalize_plan_defaults(mode)}
     end
   end
+
+  # 仅 plan 模式允许并补齐专有字段默认值，避免字段泄漏到其他模式。
+  defp normalize_plan_defaults(node, "plan") do
+    node
+    |> normalize_nullable_list(:requires_all, [])
+    |> normalize_nullable_map(:options, %{})
+  end
+
+  defp normalize_plan_defaults(node, _mode), do: node
 
   defp validate_mode_specific_fields(_node, "plan"), do: :ok
 

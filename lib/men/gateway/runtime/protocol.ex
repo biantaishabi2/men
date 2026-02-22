@@ -90,13 +90,19 @@ defmodule Men.Gateway.Runtime.Protocol do
   end
 
   defp rename_key(map, from, to) do
-    if Map.has_key?(map, to) do
-      map
-    else
-      case Map.pop(map, from) do
-        {nil, _rest} -> map
-        {value, rest} -> Map.put(rest, to, value)
-      end
+    cond do
+      Map.has_key?(map, to) ->
+        map
+
+      Map.has_key?(map, from) ->
+        value = Map.get(map, from)
+
+        map
+        |> Map.delete(from)
+        |> Map.put(to, value)
+
+      true ->
+        map
     end
   end
 
