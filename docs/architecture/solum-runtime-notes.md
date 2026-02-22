@@ -348,3 +348,118 @@ priority: int
 3. 最近 N 轮（建议 2~3 轮）图结构变化率低于阈值（例如 `< 5%`）。
 
 仅当以上条件同时满足时，才从 `research` 切换到 `plan`。
+
+## 补充：JIT Orchestration（运行时编译控制流）
+
+### 1. 命名与定义
+
+`JIT Orchestration` 指在运行时根据当前状态和回流证据，动态生成与调整下一段控制流，
+而不是在开始前一次性固定全量流程。
+
+可理解为：
+1. AOT（预编排）：先算完整 DAG，再按图执行。
+2. JIT（运行时编排）：执行中持续重算“下一步最优控制动作”。
+
+### 2. 核心闭环（运行时自编排）
+
+1. 判定任务意图（research/plan/execute）。
+2. 更新图状态并写入 REPL（任务图、证据图、阻塞关系、置信度）。
+3. 提取控制摘要（control summary）注入系统提示词。
+4. 由模型给出下一动作（action）。
+5. 动作执行后，数据流回流更新图状态。
+6. 重新编译下一段控制流（JIT 重算）。
+
+这不是“先有完整脚本再执行”，而是“边执行边编排”。
+
+### 3. 自指挥（Self-Orchestration）语义
+
+主 Agent 具备“指挥自己”的能力：
+1. 自己维护长期控制流状态（phase/goal/policy/mode）。
+2. 自己把运行事实写入“脑内状态”（REPL/状态存储）。
+3. 自己基于新证据调整控制策略与执行路径。
+
+因此控制流不是短事务，而是可持续演化的长期状态机。
+
+### 4. 最小可落地接口（建议）
+
+```yaml
+runtime_state:
+  mode: research|plan|execute
+  control_state:
+    goal: string
+    phase: string
+    policy: map
+  graph_state:
+    task_graph_ref: string
+    evidence_graph_ref: string
+  control_summary:
+    text: string
+    version: int
+  compile_tick:
+    last_recompiled_at: int
+    reason: event|timer|failure_recovery
+```
+
+说明：
+1. `control_summary` 作为系统提示词片段注入，不直接塞全量数据。
+2. `graph_state` 保持结构化全量状态，按需检索。
+3. `compile_tick` 记录每次 JIT 重算的触发原因，便于审计与调试。
+
+## 补充：控制流/数据流分离的 OTP 工程落地（聚焦版）
+
+本节不讨论三模式细节，仅定义“控制流与数据流如何分离并通信”。
+
+### 1. 状态归属（强约束）
+
+1. `ControlAgent`（GenServer）只持有控制流：
+- goal / phase / policy / pending_actions / in_flight_refs
+
+2. `ReplStore`（GenServer + ETS）只持有数据流：
+- tool outputs / research results / external events / shared vars / history
+
+约束：
+1. `ControlAgent` 不保存大体量数据（避免数据流侵入控制流）。
+2. `ReplStore` 不做控制决策（避免决策逻辑分散）。
+
+### 2. 消息协议（闭环）
+
+1. 主 Agent 委托执行：
+- `GenServer.cast(child_pid, {:run_task, task_ref, task_spec})`
+
+2. 子 Agent 回流结果：
+- `send(control_pid, {:task_done, task_ref, result_ref})`
+
+3. 主 Agent 回流处理顺序（固定）：
+- 先写数据流：`ReplStore.put_result(task_ref, payload)`  
+- 再读帧摘要：`ReplStore.build_frame(agent_id)`  
+- 再更新控制流：`update_control_state(frame)`  
+- 最后决定是否继续委托下一动作
+
+### 3. Frame 作为控制输入（不是全量上下文）
+
+`ControlAgent` 每轮只读取 `frame summary`，不直接拼接全量历史：
+
+```elixir
+%{
+  facts: [...],
+  pending: [...],
+  signals: %{errors: ..., budgets: ..., subscriptions: ...},
+  version: 123
+}
+```
+
+意义：
+1. 数据流保持完整但不污染控制提示。
+2. 控制流只消费决策必需信息。
+
+### 4. 监督树建议
+
+1. `ReplStore` 与 `ControlAgent` 并列常驻。
+2. 子 Agent 放入 `DynamicSupervisor`，失败隔离。
+3. 主 Agent 崩溃后可重建控制流；数据流由 `ReplStore` 保持连续。
+
+### 5. 一句话原则
+
+控制流 = 一个决策 GenServer。  
+数据流 = 一个共享状态服务。  
+两者只通过“消息 + frame 摘要”交互，不直接共享内部可变状态。
