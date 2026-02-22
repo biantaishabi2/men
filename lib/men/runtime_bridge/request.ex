@@ -1,14 +1,16 @@
 defmodule Men.RuntimeBridge.Request do
   @moduledoc """
-  Runtime 调用请求结构。
+  RuntimeBridge v1 统一请求模型。
   """
 
-  @enforce_keys [:session_key, :content]
-  defstruct [:session_key, :content, metadata: %{}]
+  @enforce_keys [:runtime_id]
+  defstruct [:runtime_id, :session_id, :payload, opts: %{}, timeout_ms: nil]
 
   @type t :: %__MODULE__{
-          session_key: String.t(),
-          content: String.t(),
-          metadata: map()
+          runtime_id: String.t(),
+          session_id: String.t() | nil,
+          payload: term() | nil,
+          opts: map(),
+          timeout_ms: pos_integer() | nil
         }
 end
