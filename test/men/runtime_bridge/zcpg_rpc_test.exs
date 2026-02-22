@@ -40,6 +40,27 @@ defmodule Men.RuntimeBridge.ZcpgRPCTest do
     end
   end
 
+  defmodule DeterministicTransport do
+    @behaviour Men.RuntimeBridge.ZcpgRPC.HttpTransport
+
+    @impl true
+    def request(:post, _url, _headers, body, _opts) do
+      %{"prompt" => prompt} = Jason.decode!(body)
+
+      case prompt do
+        "timeout" ->
+          {:ok, %{status: 504, body: %{"message" => "gateway timeout"}}}
+
+        "invalid" ->
+          {:ok, %{status: 422, body: %{"error" => "unprocessable"}}}
+
+        _ ->
+          {:ok,
+           %{status: 200, body: %{"text" => "ok:" <> prompt, "meta" => %{"source" => "det"}}}}
+      end
+    end
+  end
+
   setup do
     original_bridge_runtime = Application.get_env(:men, :runtime_bridge, [])
     original_zcpg_runtime = Application.get_env(:men, ZcpgRPC, [])
@@ -204,6 +225,58 @@ defmodule Men.RuntimeBridge.ZcpgRPCTest do
 
     assert rollback_payload.text == "rollback:hello"
     assert rollback_payload.meta.source == :rollback_bridge
+  end
+
+  test "并发请求不依赖全局 mode: 多请求并行映射稳定" do
+    prompts = ["ok-1", "ok-2", "timeout", "invalid", "ok-3", "ok-4"]
+
+    results =
+      prompts
+      |> Task.async_stream(
+        fn prompt ->
+          request = %Request{
+            runtime_id: "zcpg",
+            session_id: "sess-concurrent",
+            payload: prompt,
+            opts: %{request_id: "req-" <> prompt, run_id: "run-" <> prompt}
+          }
+
+          Bridge.prompt(request, adapter: ZcpgRPC, transport: DeterministicTransport)
+        end,
+        ordered: false,
+        max_concurrency: 6,
+        timeout: 2_000
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.count(results, &match?({:ok, %Response{}}, &1)) == 4
+    assert Enum.any?(results, &match?({:error, %Error{code: :timeout, retryable: true}}, &1))
+
+    assert Enum.any?(
+             results,
+             &match?({:error, %Error{code: :invalid_argument, retryable: false}}, &1)
+           )
+  end
+
+  test "v1->legacy timeout 保真: bridge_v1_enabled=true 时保留 timeout+retryable" do
+    request = build_prompt_request("timeout")
+
+    assert {:error, payload} =
+             Bridge.start_turn(
+               "timeout",
+               %{request_id: "req-v1", session_key: "sess-v1", run_id: "run-v1"},
+               adapter: ZcpgRPC,
+               transport: DeterministicTransport,
+               bridge_v1_enabled: true
+             )
+
+    assert payload.type == :timeout
+    assert payload.code == "timeout"
+    assert payload.details.retryable == true
+
+    # 确认同语义在 v1 原子接口下仍是 timeout。
+    assert {:error, %Error{code: :timeout, retryable: true}} =
+             Bridge.prompt(request, adapter: ZcpgRPC, transport: DeterministicTransport)
   end
 
   defp build_prompt_request(prompt) do
