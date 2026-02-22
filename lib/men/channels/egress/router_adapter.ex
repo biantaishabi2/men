@@ -7,7 +7,7 @@ defmodule Men.Channels.Egress.RouterAdapter do
 
   alias Men.Channels.Egress.Messages
   alias Men.Channels.Egress.Messages.EventMessage
-  alias Men.Channels.Egress.{DingtalkRobotAdapter, FeishuAdapter}
+  alias Men.Channels.Egress.{DingtalkCardAdapter, DingtalkRobotAdapter, FeishuAdapter}
 
   @impl true
   def send(target, message) do
@@ -29,7 +29,8 @@ defmodule Men.Channels.Egress.RouterAdapter do
     ensure_map_session_key(target, metadata)
   end
 
-  defp resolve_target(target, %{metadata: metadata}), do: target || Messages.metadata_value(metadata, :session_key, nil)
+  defp resolve_target(target, %{metadata: metadata}),
+    do: target || Messages.metadata_value(metadata, :session_key, nil)
 
   defp resolve_target(target, _message), do: target
 
@@ -57,12 +58,20 @@ defmodule Men.Channels.Egress.RouterAdapter do
   defp resolve_adapter(target) when is_binary(target) do
     cond do
       String.starts_with?(target, "feishu:") -> {:ok, FeishuAdapter}
-      String.starts_with?(target, "dingtalk:") -> {:ok, DingtalkRobotAdapter}
+      String.starts_with?(target, "dingtalk:") -> {:ok, dingtalk_adapter()}
       true -> {:error, :unsupported_channel}
     end
   end
 
   defp resolve_adapter(_), do: {:error, :unsupported_channel}
+
+  defp dingtalk_adapter do
+    if DingtalkCardAdapter.enabled?() do
+      DingtalkCardAdapter
+    else
+      DingtalkRobotAdapter
+    end
+  end
 
   defp map_target_session_key(target) do
     Map.get(target, :session_key) ||

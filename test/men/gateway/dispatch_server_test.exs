@@ -55,6 +55,10 @@ defmodule Men.Gateway.DispatchServerTest do
           emit_delta(context, "partial:stream_delta")
           ok_payload(prompt, context)
 
+        prompt == "stream_tool_delta" ->
+          emit_tool_delta(context)
+          ok_payload(prompt, context)
+
         true ->
           ok_payload(prompt, context)
       end
@@ -79,6 +83,19 @@ defmodule Men.Gateway.DispatchServerTest do
     defp emit_delta(context, text) do
       callback = Map.get(context, :event_callback)
       if is_function(callback, 1), do: callback.(%{type: :delta, payload: %{text: text}})
+      :ok
+    end
+
+    defp emit_tool_delta(context) do
+      callback = Map.get(context, :event_callback)
+
+      if is_function(callback, 1) do
+        callback.(%{
+          type: :delta,
+          payload: %{text: "", tool_name: "list_directory", tool_status: "start"}
+        })
+      end
+
       :ok
     end
   end
@@ -138,10 +155,7 @@ defmodule Men.Gateway.DispatchServerTest do
       session_coordinator_enabled: false
     ]
 
-    start_supervised!(
-      {DispatchServer,
-       Keyword.merge(default_opts, opts)}
-    )
+    start_supervised!({DispatchServer, Keyword.merge(default_opts, opts)})
   end
 
   defp start_session_coordinator(opts \\ []) do
@@ -257,8 +271,18 @@ defmodule Men.Gateway.DispatchServerTest do
     assert result1.session_key == "feishu:u400:t:t01"
     assert result2.session_key == "feishu:u400:t:t01"
 
-    assert_receive {:bridge_called, "turn-1", %{session_key: runtime_session_id_1, external_session_key: "feishu:u400:t:t01"}}
-    assert_receive {:bridge_called, "turn-2", %{session_key: runtime_session_id_2, external_session_key: "feishu:u400:t:t01"}}
+    assert_receive {:bridge_called, "turn-1",
+                    %{
+                      session_key: runtime_session_id_1,
+                      external_session_key: "feishu:u400:t:t01"
+                    }}
+
+    assert_receive {:bridge_called, "turn-2",
+                    %{
+                      session_key: runtime_session_id_2,
+                      external_session_key: "feishu:u400:t:t01"
+                    }}
+
     assert runtime_session_id_1 == runtime_session_id_2
   end
 
@@ -476,6 +500,30 @@ defmodule Men.Gateway.DispatchServerTest do
 
     assert_receive {:egress_called, "feishu:u-stream", %FinalMessage{} = final_message}
     assert final_message.content == "ok:stream_delta"
+  end
+
+  test "streaming_enabled 打开时会透传工具 delta 结构字段" do
+    server = start_dispatch_server(streaming_enabled: true)
+
+    event = %{
+      request_id: "req-stream-tool-1",
+      run_id: "run-stream-tool-1",
+      payload: "stream_tool_delta",
+      channel: "feishu",
+      user_id: "u-stream-tool"
+    }
+
+    assert {:ok, result} = DispatchServer.dispatch(server, event)
+    assert result.run_id == "run-stream-tool-1"
+
+    assert_receive {:egress_called, "feishu:u-stream-tool", %EventMessage{} = event_message}
+    assert event_message.event_type == :delta
+    assert event_message.payload == %{text: "", tool_name: "list_directory", tool_status: "start"}
+    assert event_message.metadata.tool_name == "list_directory"
+    assert event_message.metadata.tool_status == "start"
+
+    assert_receive {:egress_called, "feishu:u-stream-tool", %FinalMessage{} = final_message}
+    assert final_message.content == "ok:stream_tool_delta"
   end
 
   test "接收到非关键 session_event 时兜底吞掉，不影响进程存活" do

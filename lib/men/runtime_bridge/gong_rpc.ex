@@ -583,6 +583,52 @@ defmodule Men.RuntimeBridge.GongRPC do
           event_callback
         )
 
+      {:session_event, %{type: "tool.start", payload: payload}} when is_map(payload) ->
+        tool_name = Map.get(payload, :tool_name, Map.get(payload, "tool_name", "unknown_tool"))
+
+        emit_event(event_callback, %{
+          type: :delta,
+          payload: %{text: "", tool_name: tool_name, tool_status: "start"}
+        })
+
+        do_await_completion(
+          deadline_ms,
+          completion_timeout_ms,
+          result_text,
+          delta_text,
+          gong_node,
+          session_pid,
+          rpc_client,
+          rpc_timeout_ms,
+          request_id,
+          session_key,
+          run_id,
+          event_callback
+        )
+
+      {:session_event, %{type: "tool.end", payload: payload}} when is_map(payload) ->
+        tool_name = Map.get(payload, :tool_name, Map.get(payload, "tool_name", "unknown_tool"))
+
+        emit_event(event_callback, %{
+          type: :delta,
+          payload: %{text: "", tool_name: tool_name, tool_status: "end"}
+        })
+
+        do_await_completion(
+          deadline_ms,
+          completion_timeout_ms,
+          result_text,
+          delta_text,
+          gong_node,
+          session_pid,
+          rpc_client,
+          rpc_timeout_ms,
+          request_id,
+          session_key,
+          run_id,
+          event_callback
+        )
+
       {:session_event, %{type: "lifecycle.result", payload: payload}} when is_map(payload) ->
         assistant_text = Map.get(payload, :assistant_text, Map.get(payload, "assistant_text"))
 

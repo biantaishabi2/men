@@ -130,6 +130,20 @@ if dingtalk_has_webhook or dingtalk_has_app do
     app_secret: dingtalk_app_secret,
     token_url: System.get_env("DINGTALK_TOKEN_URL"),
     app_send_url: System.get_env("DINGTALK_ROBOT_OTO_SEND_URL")
+
+  config :men, Men.Channels.Egress.DingtalkCardAdapter,
+    enabled: System.get_env("DINGTALK_CARD_STREAM_ENABLED") in ~w(true TRUE 1),
+    robot_code: dingtalk_robot_code,
+    app_key: dingtalk_app_key,
+    app_secret: dingtalk_app_secret,
+    last_message: System.get_env("DINGTALK_CARD_LAST_MESSAGE"),
+    search_icon: System.get_env("DINGTALK_CARD_SEARCH_ICON"),
+    search_desc: System.get_env("DINGTALK_CARD_SEARCH_DESC"),
+    token_url: System.get_env("DINGTALK_TOKEN_URL"),
+    card_template_id: System.get_env("DINGTALK_CARD_TEMPLATE_ID"),
+    card_create_url: System.get_env("DINGTALK_CARD_CREATE_URL"),
+    card_append_url: System.get_env("DINGTALK_CARD_APPEND_URL"),
+    card_finalize_url: System.get_env("DINGTALK_CARD_FINALIZE_URL")
 end
 
 # ## Using releases

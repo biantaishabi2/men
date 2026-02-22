@@ -72,12 +72,19 @@ defmodule Men.Gateway.DispatchServer do
         Keyword.get(
           opts,
           :streaming_enabled,
-          Keyword.get(config, :streaming_enabled, Keyword.get(config, :chat_streaming_enabled, false))
+          Keyword.get(
+            config,
+            :streaming_enabled,
+            Keyword.get(config, :chat_streaming_enabled, false)
+          )
         ),
       session_coordinator_enabled:
-        Keyword.get(opts, :session_coordinator_enabled, Keyword.get(coordinator_config, :enabled, true)),
-      session_coordinator_name:
-        Keyword.get(opts, :session_coordinator_name, SessionCoordinator),
+        Keyword.get(
+          opts,
+          :session_coordinator_enabled,
+          Keyword.get(coordinator_config, :enabled, true)
+        ),
+      session_coordinator_name: Keyword.get(opts, :session_coordinator_name, SessionCoordinator),
       processed_run_ids: MapSet.new(),
       session_last_context: %{}
     }
@@ -107,7 +114,10 @@ defmodule Men.Gateway.DispatchServer do
 
   @impl true
   def handle_info(message, state) do
-    Logger.error("#{inspect(__MODULE__)} received unexpected message in handle_info/2: #{inspect(message)}")
+    Logger.error(
+      "#{inspect(__MODULE__)} received unexpected message in handle_info/2: #{inspect(message)}"
+    )
+
     {:noreply, state}
   end
 
@@ -137,8 +147,12 @@ defmodule Men.Gateway.DispatchServer do
         Logger.error("dispatch_server.run_dispatch.bridge_error",
           request_id: context.request_id,
           run_id: context.run_id,
+          type: Map.get(error_payload, :type),
           code: Map.get(error_payload, :code),
-          message: Map.get(error_payload, :message)
+          message: Map.get(error_payload, :message),
+          details: Map.get(error_payload, :details),
+          error_payload:
+            inspect(error_payload, pretty: true, limit: :infinity, printable_limit: :infinity)
         )
 
         error_payload = ensure_error_egress_result(state, context, error_payload)
@@ -295,11 +309,11 @@ defmodule Men.Gateway.DispatchServer do
 
     bridge_context =
       %{
-      request_id: context.request_id,
-      session_key: runtime_session_id,
-      external_session_key: context.session_key,
-      run_id: context.run_id
-    }
+        request_id: context.request_id,
+        session_key: runtime_session_id,
+        external_session_key: context.session_key,
+        run_id: context.run_id
+      }
       |> maybe_put_event_callback(state, context)
 
     with {:ok, prompt} <- payload_to_prompt(context.payload) do
@@ -308,7 +322,13 @@ defmodule Men.Gateway.DispatchServer do
           {:ok, payload}
 
         {:error, error_payload} ->
-          maybe_invalidate_runtime_session(state, context.session_key, runtime_session_id, error_payload)
+          maybe_invalidate_runtime_session(
+            state,
+            context.session_key,
+            runtime_session_id,
+            error_payload
+          )
+
           {:bridge_error, error_payload, context}
       end
     else
@@ -347,7 +367,8 @@ defmodule Men.Gateway.DispatchServer do
     end
   end
 
-  defp resolve_runtime_session_id(%{session_coordinator_enabled: false}, session_key), do: session_key
+  defp resolve_runtime_session_id(%{session_coordinator_enabled: false}, session_key),
+    do: session_key
 
   defp resolve_runtime_session_id(state, session_key) do
     case safe_get_or_create_runtime_session_id(state.session_coordinator_name, session_key) do
@@ -362,14 +383,23 @@ defmodule Men.Gateway.DispatchServer do
   # coordinator 可能在调用窗口重启，捕获 exit 以保证 dispatch 可降级。
   defp safe_get_or_create_runtime_session_id(coordinator_name, session_key) do
     try do
-      SessionCoordinator.get_or_create(coordinator_name, session_key, &generate_runtime_session_id/0)
+      SessionCoordinator.get_or_create(
+        coordinator_name,
+        session_key,
+        &generate_runtime_session_id/0
+      )
     catch
       :exit, _reason -> {:error, :session_coordinator_unavailable}
     end
   end
 
-  defp maybe_invalidate_runtime_session(%{session_coordinator_enabled: false}, _session_key, _runtime_session_id, _error_payload),
-    do: :ok
+  defp maybe_invalidate_runtime_session(
+         %{session_coordinator_enabled: false},
+         _session_key,
+         _runtime_session_id,
+         _error_payload
+       ),
+       do: :ok
 
   defp maybe_invalidate_runtime_session(state, session_key, runtime_session_id, error_payload) do
     code =
@@ -377,7 +407,9 @@ defmodule Men.Gateway.DispatchServer do
       |> Map.get(:code)
       |> normalize_error_code()
 
-    if code == "", do: :ok, else: invalidate_session_mapping(state, session_key, runtime_session_id, code)
+    if code == "",
+      do: :ok,
+      else: invalidate_session_mapping(state, session_key, runtime_session_id, code)
   end
 
   defp invalidate_session_mapping(state, session_key, runtime_session_id, code) do
@@ -400,8 +432,12 @@ defmodule Men.Gateway.DispatchServer do
     end
   end
 
-  defp normalize_error_code(code) when is_atom(code), do: code |> Atom.to_string() |> String.downcase()
-  defp normalize_error_code(code) when is_binary(code), do: code |> String.trim() |> String.downcase()
+  defp normalize_error_code(code) when is_atom(code),
+    do: code |> Atom.to_string() |> String.downcase()
+
+  defp normalize_error_code(code) when is_binary(code),
+    do: code |> String.trim() |> String.downcase()
+
   defp normalize_error_code(_), do: ""
 
   defp generate_runtime_session_id do
@@ -450,14 +486,11 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   defp do_send_event(state, context, %{type: :delta, payload: payload}) do
-    text =
-      payload
-      |> normalize_stream_payload()
-      |> Map.get(:text, "")
+    stream_payload = normalize_stream_payload(payload)
 
     message = %EventMessage{
       event_type: :delta,
-      payload: %{text: text},
+      payload: stream_payload,
       metadata:
         context.metadata
         |> Map.merge(%{
@@ -467,6 +500,7 @@ defmodule Men.Gateway.DispatchServer do
           seq: System.unique_integer([:positive, :monotonic]),
           timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
         })
+        |> Map.merge(stream_metadata(stream_payload))
     }
 
     state.egress_adapter.send(context.session_key, message)
@@ -474,10 +508,45 @@ defmodule Men.Gateway.DispatchServer do
 
   defp do_send_event(_state, _context, _event), do: :ok
 
-  defp normalize_stream_payload(%{text: text}) when is_binary(text), do: %{text: text}
-  defp normalize_stream_payload(%{"text" => text}) when is_binary(text), do: %{text: text}
+  defp normalize_stream_payload(payload) when is_map(payload) do
+    text =
+      case map_value(payload, :text, "") do
+        value when is_binary(value) -> value
+        _ -> ""
+      end
+
+    %{}
+    |> Map.put(:text, text)
+    |> put_if_binary(:tool_name, map_value(payload, :tool_name, nil))
+    |> put_if_binary(:tool_status, map_value(payload, :tool_status, nil))
+    |> put_if_binary(:rate_used_pct, map_value(payload, :rate_used_pct, nil))
+    |> put_if_binary(:phase, map_value(payload, :phase, nil))
+  end
+
   defp normalize_stream_payload(text) when is_binary(text), do: %{text: text}
   defp normalize_stream_payload(_), do: %{text: ""}
+
+  defp stream_metadata(payload) when is_map(payload) do
+    %{}
+    |> put_if_binary(:tool_name, Map.get(payload, :tool_name))
+    |> put_if_binary(:tool_status, Map.get(payload, :tool_status))
+    |> put_if_binary(:rate_used_pct, Map.get(payload, :rate_used_pct))
+    |> put_if_binary(:phase, Map.get(payload, :phase))
+  end
+
+  defp stream_metadata(_), do: %{}
+
+  defp put_if_binary(map, _key, nil), do: map
+
+  defp put_if_binary(map, key, value) when is_binary(value) do
+    Map.put(map, key, value)
+  end
+
+  defp put_if_binary(map, _key, _value), do: map
+
+  defp map_value(map, key, default) when is_map(map) do
+    Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+  end
 
   defp mark_processed(state, context) do
     %{

@@ -6,8 +6,12 @@ defmodule Men.RuntimeBridge.GongRPCTest do
   defmodule MockNodeConnector do
     def ensure_connected(_cfg, _rpc_client) do
       case Application.get_env(:men, :gong_rpc_test_connector_mode, :ok) do
-        :ok -> {:ok, :"gong@127.0.0.1"}
-        :error -> {:error, %{type: :failed, code: "NODE_DISCONNECTED", message: "node down", details: %{}}}
+        :ok ->
+          {:ok, :"gong@127.0.0.1"}
+
+        :error ->
+          {:error,
+           %{type: :failed, code: "NODE_DISCONNECTED", message: "node down", details: %{}}}
       end
     end
   end
@@ -20,7 +24,9 @@ defmodule Men.RuntimeBridge.GongRPCTest do
       if mode == :create_badrpc do
         {:badrpc, :nodedown}
       else
-        session_id = "session_" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+        session_id =
+          "session_" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+
         pid = spawn(fn -> Process.sleep(:infinity) end)
         :ok = register_session(pid, session_id)
         {:ok, pid, session_id}
@@ -35,25 +41,50 @@ defmodule Men.RuntimeBridge.GongRPCTest do
 
       case mode do
         :success ->
-          send(self(), {:session_event, %{type: "lifecycle.result", payload: %{assistant_text: "rpc ok"}}})
+          send(
+            self(),
+            {:session_event, %{type: "lifecycle.result", payload: %{assistant_text: "rpc ok"}}}
+          )
+
           send(self(), {:session_event, %{type: "lifecycle.completed"}})
           :ok
 
         :with_delta ->
           send(self(), {:session_event, %{type: "message.delta", payload: %{content: "part-1"}}})
           send(self(), {:session_event, %{type: "message.delta", payload: %{content: "part-2"}}})
-          send(self(), {:session_event, %{type: "lifecycle.result", payload: %{assistant_text: "rpc ok"}}})
+
+          send(
+            self(),
+            {:session_event, %{type: "lifecycle.result", payload: %{assistant_text: "rpc ok"}}}
+          )
+
           send(self(), {:session_event, %{type: "lifecycle.completed"}})
           :ok
 
         :with_noise_events ->
           send(self(), {:session_event, %{type: "lifecycle.received", payload: %{}}})
           send(self(), {:session_event, %{type: "message.start", payload: %{}}})
-          send(self(), {:session_event, %{type: "tool.start", payload: %{tool_name: "list_directory"}}})
+
+          send(
+            self(),
+            {:session_event, %{type: "tool.start", payload: %{tool_name: "list_directory"}}}
+          )
+
           send(self(), {:session_event, %{type: "message.delta", payload: %{content: "part-a"}}})
-          send(self(), {:session_event, %{type: "tool.end", payload: %{tool_name: "list_directory"}}})
+
+          send(
+            self(),
+            {:session_event, %{type: "tool.end", payload: %{tool_name: "list_directory"}}}
+          )
+
           send(self(), {:session_event, %{type: "message.end", payload: %{}}})
-          send(self(), {:session_event, %{type: "lifecycle.result", payload: %{assistant_text: "rpc noisy ok"}}})
+
+          send(
+            self(),
+            {:session_event,
+             %{type: "lifecycle.result", payload: %{assistant_text: "rpc noisy ok"}}}
+          )
+
           send(self(), {:session_event, %{type: "lifecycle.completed"}})
           :ok
 
@@ -65,7 +96,12 @@ defmodule Men.RuntimeBridge.GongRPCTest do
           if count == 1 do
             {:error, :session_not_found}
           else
-            send(self(), {:session_event, %{type: "lifecycle.result", payload: %{assistant_text: "rpc rebuilt"}}})
+            send(
+              self(),
+              {:session_event,
+               %{type: "lifecycle.result", payload: %{assistant_text: "rpc rebuilt"}}}
+            )
+
             send(self(), {:session_event, %{type: "lifecycle.completed"}})
             :ok
           end
@@ -87,7 +123,8 @@ defmodule Men.RuntimeBridge.GongRPCTest do
       :ok
     end
 
-    def call(_node, Gong.Session, :history, [_pid], _timeout), do: {:ok, [%{role: :assistant, content: "history text"}]}
+    def call(_node, Gong.Session, :history, [_pid], _timeout),
+      do: {:ok, [%{role: :assistant, content: "history text"}]}
 
     def call(_node, Gong.Session, :get_last_assistant_message, [history], _timeout) do
       case history do
@@ -161,8 +198,19 @@ defmodule Men.RuntimeBridge.GongRPCTest do
   end
 
   test "同一 session_key 连续请求会复用会话，不会每轮关闭" do
-    assert {:ok, _} = GongRPC.start_turn("hello-1", %{request_id: "req-rpc-reuse-1", session_key: "dingtalk:reuse", run_id: "run-1"})
-    assert {:ok, _} = GongRPC.start_turn("hello-2", %{request_id: "req-rpc-reuse-2", session_key: "dingtalk:reuse", run_id: "run-2"})
+    assert {:ok, _} =
+             GongRPC.start_turn("hello-1", %{
+               request_id: "req-rpc-reuse-1",
+               session_key: "dingtalk:reuse",
+               run_id: "run-1"
+             })
+
+    assert {:ok, _} =
+             GongRPC.start_turn("hello-2", %{
+               request_id: "req-rpc-reuse-2",
+               session_key: "dingtalk:reuse",
+               run_id: "run-2"
+             })
 
     assert_receive {:rpc_create_session, :success}
     refute_receive {:rpc_create_session, :success}
@@ -201,7 +249,7 @@ defmodule Men.RuntimeBridge.GongRPCTest do
     assert payload.text == "rpc noisy ok"
   end
 
-  test "tool.start/tool.end 不会额外映射为 delta 回调（保持工具过程静默）" do
+  test "tool.start/tool.end 会映射为结构化 delta 回调（供卡片状态消费）" do
     Application.put_env(:men, :gong_rpc_test_mode, :with_noise_events)
     parent = self()
     callback = fn event -> send(parent, {:stream_event, event}) end
@@ -215,9 +263,23 @@ defmodule Men.RuntimeBridge.GongRPCTest do
              })
 
     assert payload.text == "rpc noisy ok"
+
+    assert_receive {:stream_event,
+                    %{
+                      type: :delta,
+                      payload: %{text: "", tool_name: "list_directory", tool_status: "start"}
+                    }}
+
     assert_receive {:stream_event, %{type: :delta, payload: %{text: "part-a"}}}
-    refute_receive {:stream_event, %{type: :delta, payload: %{text: "\n[tool:start] list_directory\n"}}}
-    refute_receive {:stream_event, %{type: :delta, payload: %{text: "\n[tool:end] list_directory\n"}}}
+
+    assert_receive {:stream_event,
+                    %{
+                      type: :delta,
+                      payload: %{text: "", tool_name: "list_directory", tool_status: "end"}
+                    }}
+
+    refute_receive {:stream_event,
+                    %{type: :delta, payload: %{text: "\n[tool:start] list_directory\n"}}}
   end
 
   test "会话失效时触发关闭并重建" do
@@ -267,7 +329,12 @@ defmodule Men.RuntimeBridge.GongRPCTest do
 
   test "等待 completion 超时返回 RPC_TIMEOUT" do
     Application.put_env(:men, :gong_rpc_test_mode, :timeout)
-    Application.put_env(:men, GongRPC, Application.get_env(:men, GongRPC, []) |> Keyword.put(:completion_timeout_ms, 60))
+
+    Application.put_env(
+      :men,
+      GongRPC,
+      Application.get_env(:men, GongRPC, []) |> Keyword.put(:completion_timeout_ms, 60)
+    )
 
     assert {:error, error} =
              GongRPC.start_turn("hello", %{
