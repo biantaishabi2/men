@@ -110,6 +110,25 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapterTest do
     assert String.contains?(content, "session_key=dingtalk:u1")
   end
 
+  test "发送 error EventMessage 时 code/reason 为结构化值不会崩溃" do
+    message = %EventMessage{
+      event_type: :error,
+      payload: %{reason: %{kind: "timeout"}, code: {:upstream, :timeout}},
+      metadata: %{request_id: "req-error-struct", run_id: "run-error-struct", session_key: "dingtalk:u1"}
+    }
+
+    assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", message)
+    assert_receive {:transport_post, _url, _headers, body}
+
+    decoded = Jason.decode!(body)
+    content = decoded["text"]["content"]
+
+    assert String.contains?(content, "[ERROR][{:upstream, :timeout}]")
+    assert String.contains?(content, "%{kind: \"timeout\"}")
+    assert String.contains?(content, "run_id=run-error-struct")
+    assert String.contains?(content, "session_key=dingtalk:u1")
+  end
+
   test "兼容发送 FinalMessage 成功" do
     message = %FinalMessage{
       session_key: "dingtalk:u1",

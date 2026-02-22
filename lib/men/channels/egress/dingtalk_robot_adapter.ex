@@ -172,6 +172,7 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
       payload_value(message.payload, :reason) ||
         payload_value(message.payload, :message) ||
         "dispatch failed"
+      |> stringify_error_field("dispatch failed")
 
     prefix = if code == "", do: "[ERROR]", else: "[ERROR][#{code}]"
 
@@ -210,7 +211,15 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
   end
 
   defp normalize_error_code(code) when is_binary(code), do: String.trim(code)
-  defp normalize_error_code(code), do: to_string(code)
+  defp normalize_error_code(code), do: stringify_error_field(code, "") |> String.trim()
+
+  # 错误字段可能是结构化类型，统一安全转字符串，避免 String.Chars 协议崩溃。
+  defp stringify_error_field(nil, default), do: default
+  defp stringify_error_field(value, _default) when is_binary(value), do: value
+  defp stringify_error_field(value, _default) when is_atom(value), do: Atom.to_string(value)
+  defp stringify_error_field(value, _default) when is_integer(value), do: Integer.to_string(value)
+  defp stringify_error_field(value, _default) when is_float(value), do: :erlang.float_to_binary(value, [:compact])
+  defp stringify_error_field(value, _default), do: inspect(value)
 
   defp metadata_value(metadata, key, default), do: Messages.metadata_value(metadata, key, default)
 
