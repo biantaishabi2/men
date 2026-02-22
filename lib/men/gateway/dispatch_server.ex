@@ -4,6 +4,7 @@ defmodule Men.Gateway.DispatchServer do
   """
 
   use GenServer
+  require Logger
 
   alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
   alias Men.Gateway.SessionCoordinator
@@ -90,23 +91,46 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   defp run_dispatch(state, inbound_event) do
+    Logger.info("dispatch_server.run_dispatch.begin", event: summarize_event(inbound_event))
+
     with {:ok, context} <- normalize_event(inbound_event),
          :ok <- ensure_not_duplicate(context.run_id, state),
          {:ok, bridge_payload} <- do_start_turn(state, context),
          :ok <- do_send_final(state, context, bridge_payload) do
       new_state = mark_processed(state, context)
+
+      Logger.info("dispatch_server.run_dispatch.ok",
+        request_id: context.request_id,
+        run_id: context.run_id,
+        session_key: context.session_key
+      )
+
       {{:ok, build_dispatch_result(context, bridge_payload)}, new_state}
     else
       {:duplicate, run_id} ->
         _ = run_id
+        Logger.warning("dispatch_server.run_dispatch.duplicate", run_id: run_id)
         {{:ok, :duplicate}, state}
 
       {:bridge_error, error_payload, context} ->
+        Logger.error("dispatch_server.run_dispatch.bridge_error",
+          request_id: context.request_id,
+          run_id: context.run_id,
+          code: Map.get(error_payload, :code),
+          message: Map.get(error_payload, :message)
+        )
+
         error_payload = ensure_error_egress_result(state, context, error_payload)
         new_state = maybe_mark_processed(state, context, error_payload)
         {{:error, build_error_result(context, error_payload)}, new_state}
 
       {:egress_error, reason, context} ->
+        Logger.error("dispatch_server.run_dispatch.egress_error",
+          request_id: context.request_id,
+          run_id: context.run_id,
+          reason: inspect(reason)
+        )
+
         error_payload = %{
           type: :failed,
           code: "EGRESS_ERROR",
@@ -119,6 +143,8 @@ defmodule Men.Gateway.DispatchServer do
         {{:error, build_error_result(context, error_payload)}, new_state}
 
       {:error, reason} ->
+        Logger.error("dispatch_server.run_dispatch.invalid_event", reason: inspect(reason))
+
         synthetic_context = fallback_context(inbound_event)
 
         error_payload = %{
@@ -132,6 +158,18 @@ defmodule Men.Gateway.DispatchServer do
         {{:error, build_error_result(synthetic_context, error_payload)}, state}
     end
   end
+
+  defp summarize_event(%{} = inbound_event) do
+    %{
+      request_id: Map.get(inbound_event, :request_id),
+      run_id: Map.get(inbound_event, :run_id),
+      channel: Map.get(inbound_event, :channel),
+      user_id: Map.get(inbound_event, :user_id),
+      session_key: Map.get(inbound_event, :session_key)
+    }
+  end
+
+  defp summarize_event(other), do: %{raw: inspect(other)}
 
   # 错误回写失败时统一抬升为 egress 失败，避免调用方误判。
   defp ensure_error_egress_result(state, context, error_payload) do

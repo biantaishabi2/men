@@ -10,6 +10,7 @@ import Config
 runtime_bridge_impl =
   case System.get_env("RUNTIME_BRIDGE_IMPL") do
     "mock" -> Men.RuntimeBridge.Mock
+    "gong_rpc" -> Men.RuntimeBridge.GongRPC
     _ -> Men.RuntimeBridge.GongCLI
   end
 
@@ -66,6 +67,7 @@ end
 config :men, :runtime_bridge,
   # 支持仅通过配置切换 bridge 实现，不做运行时动态开关。
   bridge_impl: runtime_bridge_impl,
+  command: System.get_env("RUNTIME_BRIDGE_COMMAND"),
   timeout_ms: parse_positive_integer_env.("RUNTIME_BRIDGE_TIMEOUT_MS", 30_000),
   max_concurrency: parse_positive_integer_env.("RUNTIME_BRIDGE_MAX_CONCURRENCY", 10),
   backpressure_strategy: :reject
@@ -82,14 +84,52 @@ config :men, Men.Gateway.SessionCoordinator,
       [:runtime_session_not_found]
     )
 
-# 钉钉机器人回发配置（生产可直接由环境变量驱动）。
-dingtalk_webhook_url = System.get_env("DINGTALK_ROBOT_WEBHOOK_URL")
+config :men, Men.Gateway.DispatchServer, bridge_adapter: runtime_bridge_impl
 
-if is_binary(dingtalk_webhook_url) and dingtalk_webhook_url != "" do
+gong_rpc_node_start_type =
+  case System.get_env("GONG_RPC_NODE_START_TYPE") do
+    "shortnames" -> :shortnames
+    _ -> :longnames
+  end
+
+config :men, Men.RuntimeBridge.GongRPC,
+  gong_node: System.get_env("GONG_RPC_NODE"),
+  local_node: System.get_env("GONG_RPC_LOCAL_NODE"),
+  node_start_type: gong_rpc_node_start_type,
+  cookie: System.get_env("GONG_RPC_COOKIE"),
+  rpc_timeout_ms: parse_positive_integer_env.("GONG_RPC_TIMEOUT_MS", 30_000),
+  completion_timeout_ms: parse_positive_integer_env.("GONG_RPC_COMPLETION_TIMEOUT_MS", 60_000),
+  model: System.get_env("GONG_RPC_MODEL") || "deepseek:deepseek-chat"
+
+# 钉钉机器人回发配置（支持 webhook 与 app_robot 两种模式）。
+dingtalk_mode =
+  case System.get_env("DINGTALK_ROBOT_MODE") do
+    "app_robot" -> :app_robot
+    "webhook" -> :webhook
+    _ -> nil
+  end
+
+dingtalk_webhook_url = System.get_env("DINGTALK_ROBOT_WEBHOOK_URL")
+dingtalk_robot_code = System.get_env("DINGTALK_ROBOT_CODE")
+dingtalk_app_key = System.get_env("DINGTALK_APP_KEY")
+dingtalk_app_secret = System.get_env("DINGTALK_APP_SECRET")
+
+dingtalk_has_webhook = is_binary(dingtalk_webhook_url) and dingtalk_webhook_url != ""
+dingtalk_has_app = is_binary(dingtalk_robot_code) and dingtalk_robot_code != ""
+
+if dingtalk_has_webhook or dingtalk_has_app do
   config :men, Men.Channels.Egress.DingtalkRobotAdapter,
+    mode: dingtalk_mode,
     webhook_url: dingtalk_webhook_url,
     secret: System.get_env("DINGTALK_ROBOT_SECRET"),
-    sign_enabled: System.get_env("DINGTALK_ROBOT_SIGN_ENABLED") in ~w(true TRUE 1)
+    sign_enabled: System.get_env("DINGTALK_ROBOT_SIGN_ENABLED") in ~w(true TRUE 1),
+    msg_key: System.get_env("DINGTALK_ROBOT_MSG_KEY"),
+    markdown_title: System.get_env("DINGTALK_ROBOT_MARKDOWN_TITLE"),
+    robot_code: dingtalk_robot_code,
+    app_key: dingtalk_app_key,
+    app_secret: dingtalk_app_secret,
+    token_url: System.get_env("DINGTALK_TOKEN_URL"),
+    app_send_url: System.get_env("DINGTALK_ROBOT_OTO_SEND_URL")
 end
 
 # ## Using releases

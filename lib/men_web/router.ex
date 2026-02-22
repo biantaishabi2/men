@@ -27,6 +27,12 @@ defmodule MenWeb.Router do
     post "/dingtalk", DingtalkController, :callback
   end
 
+  scope "/internal", MenWeb.Internal do
+    pipe_through :api
+
+    post "/dingtalk/stream", DingtalkStreamController, :create
+  end
+
   # Other scopes may use custom stacks.
   # scope "/api", MenWeb do
   #   pipe_through :api
