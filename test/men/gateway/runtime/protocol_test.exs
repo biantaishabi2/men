@@ -122,6 +122,63 @@ defmodule Men.Gateway.Runtime.ProtocolTest do
     assert err.path == ["extra"]
   end
 
+  test "node 同义键并存不误报 unknown_field" do
+    input = %{"id" => "n1", :id => "n1", "mode" => "research"}
+
+    assert {:ok, node} = Protocol.validate_node(input)
+    assert node.id == "n1"
+    assert node.status == "pending"
+  end
+
+  test "edge 同义键并存不误报 unknown_field" do
+    input = %{"from" => "n1", :from => "n1", "to" => "n2", "type" => "depends_on"}
+
+    assert {:ok, edge} = Protocol.validate_edge(input)
+    assert edge.from == "n1"
+    assert edge.to == "n2"
+    assert edge.type == "depends_on"
+  end
+
+  test "encode/decode 识别 edge 时不被 id 误判为 node" do
+    input = %{"id" => "shadow", "from" => "n1", "to" => "n2", "type" => "depends_on"}
+
+    assert {:error, [encode_err]} = Protocol.encode(input)
+    assert encode_err.code == :unknown_field
+    assert encode_err.path == ["id"]
+
+    assert {:error, [decode_err]} = Protocol.decode(input)
+    assert decode_err.code == :unknown_field
+    assert decode_err.path == ["id"]
+  end
+
+  test "并发校验保持稳定" do
+    inputs =
+      for idx <- 1..50 do
+        %{"id" => "n#{idx}", "mode" => "research"}
+      end
+
+    results =
+      Task.async_stream(inputs, &Protocol.validate_node/1, max_concurrency: 10, timeout: 5_000)
+      |> Enum.to_list()
+
+    assert Enum.all?(results, fn
+             {:ok, {:ok, node}} -> node.status == "pending" and node.version == 1
+             _ -> false
+           end)
+  end
+
+  test "深层 meta 结构可通过校验" do
+    deep_meta =
+      Enum.reduce(1..30, %{"leaf" => true}, fn idx, acc ->
+        %{"level_#{idx}" => acc}
+      end)
+
+    input = %{"id" => "n-deep", "mode" => "plan", "meta" => deep_meta}
+
+    assert {:ok, node} = Protocol.validate_node(input)
+    assert is_map(node.meta)
+  end
+
   test "validate/encode 受 feature flag 控制" do
     Application.put_env(:men, :runtime_protocol_v2, false)
 

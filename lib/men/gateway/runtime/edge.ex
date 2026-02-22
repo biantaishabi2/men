@@ -53,18 +53,12 @@ defmodule Men.Gateway.Runtime.Edge do
 
   defp normalize_key(_), do: nil
 
-  defp reject_unknown_fields(original, normalized) do
-    known_size = map_size(normalized)
-
-    if map_size(original) == known_size do
-      :ok
-    else
-      unknown_key =
-        Enum.find_value(original, fn {key, _value} ->
-          if is_nil(normalize_key(key)), do: key, else: nil
-        end)
-
-      {:error, error([unknown_key], :unknown_field, "字段未定义")}
+  defp reject_unknown_fields(original, _normalized) do
+    case Enum.find_value(original, fn {key, _value} ->
+           if is_nil(normalize_key(key)), do: key, else: nil
+         end) do
+      nil -> :ok
+      unknown_key -> {:error, error([unknown_key], :unknown_field, "字段未定义")}
     end
   end
 
