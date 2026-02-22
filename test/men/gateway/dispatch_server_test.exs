@@ -1,7 +1,7 @@
 defmodule Men.Gateway.DispatchServerTest do
   use ExUnit.Case, async: false
 
-  alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
+  alias Men.Channels.Egress.Messages.EventMessage
   alias Men.Gateway.DispatchServer
 
   defmodule MockBridge do
@@ -28,6 +28,43 @@ defmodule Men.Gateway.DispatchServerTest do
              code: "BRIDGE_FAIL",
              message: "runtime bridge failed",
              details: %{source: :mock}
+           }}
+
+        prompt == "stream_ab" ->
+          {:ok,
+           %{
+             events: [
+               %{event_type: :delta, text: "a"},
+               %{event_type: :delta, text: "b"},
+               %{event_type: :final, text: "ab"}
+             ]
+           }}
+
+        prompt == "final_then_delta" ->
+          {:ok,
+           %{
+             events: [
+               %{event_type: :final, text: "done"},
+               %{event_type: :delta, text: "late"}
+             ]
+           }}
+
+        prompt == "stream_isolation_a" ->
+          {:ok,
+           %{
+             events: [
+               %{event_type: :delta, text: "A1"},
+               %{event_type: :final, text: "A-final"}
+             ]
+           }}
+
+        prompt == "stream_isolation_b" ->
+          {:ok,
+           %{
+             events: [
+               %{event_type: :delta, text: "B1"},
+               %{event_type: :final, text: "B-final"}
+             ]
            }}
 
         prompt == "slow" ->
@@ -67,12 +104,12 @@ defmodule Men.Gateway.DispatchServerTest do
       notify({:egress_called, target, message})
 
       case {Application.get_env(:men, :dispatch_server_test_fail_final_egress), message} do
-        {reason, %Men.Channels.Egress.Messages.FinalMessage{}} when not is_nil(reason) ->
+        {reason, %EventMessage{event_type: :final}} when not is_nil(reason) ->
           {:error, reason}
 
         _ ->
           case {Application.get_env(:men, :dispatch_server_test_fail_error_egress), message} do
-            {reason, %Men.Channels.Egress.Messages.ErrorMessage{}} when not is_nil(reason) ->
+            {reason, %EventMessage{event_type: :error}} when not is_nil(reason) ->
               {:error, reason}
 
             _ ->
@@ -174,13 +211,46 @@ defmodule Men.Gateway.DispatchServerTest do
 
     assert run_id == result.run_id
 
-    assert_receive {:egress_called, "feishu:u100", %FinalMessage{} = message}
-    assert message.content == "ok:hello"
+    assert_receive {:egress_called, "feishu:u100", %EventMessage{event_type: :final} = message}
+    assert message.payload.text == "ok:hello"
     assert message.metadata.request_id == "req-1"
     assert message.metadata.run_id == result.run_id
+    assert message.metadata.seq == 1
+    assert is_binary(message.metadata.timestamp)
   end
 
-  test "bridge error: 触发 error egress 并返回 error_result" do
+  test "delta + final 顺序输出" do
+    server = start_dispatch_server()
+
+    event = %{
+      request_id: "req-stream-1",
+      payload: "stream_ab",
+      run_id: "run-stream-1",
+      channel: "dingtalk",
+      user_id: "u-stream"
+    }
+
+    assert {:ok, result} = DispatchServer.dispatch(server, event)
+    assert result.run_id == "run-stream-1"
+
+    assert_receive {:egress_called, "dingtalk:u-stream", %EventMessage{event_type: :delta} = delta1}
+    assert_receive {:egress_called, "dingtalk:u-stream", %EventMessage{event_type: :delta} = delta2}
+    assert_receive {:egress_called, "dingtalk:u-stream", %EventMessage{event_type: :final} = final}
+
+    assert delta1.payload.text == "a"
+    assert delta2.payload.text == "b"
+    assert final.payload.text == "ab"
+
+    assert delta1.metadata.run_id == "run-stream-1"
+    assert delta2.metadata.run_id == "run-stream-1"
+    assert final.metadata.run_id == "run-stream-1"
+    assert delta1.metadata.session_key == "dingtalk:u-stream"
+    assert final.metadata.session_key == "dingtalk:u-stream"
+
+    assert [delta1.metadata.seq, delta2.metadata.seq, final.metadata.seq] == [1, 2, 3]
+  end
+
+  test "error 事件标准化: 触发 error egress 并返回 error_result" do
     server = start_dispatch_server()
 
     event = %{
@@ -195,9 +265,11 @@ defmodule Men.Gateway.DispatchServerTest do
     assert error_result.reason == "runtime bridge failed"
     assert error_result.session_key == "feishu:u200"
 
-    assert_receive {:egress_called, "feishu:u200", %ErrorMessage{} = message}
-    assert message.code == "BRIDGE_FAIL"
-    assert message.reason == "runtime bridge failed"
+    assert_receive {:egress_called, "feishu:u200", %EventMessage{event_type: :error} = message}
+    assert message.payload.code == "BRIDGE_FAIL"
+    assert message.payload.reason == "runtime bridge failed"
+    assert message.metadata.run_id == error_result.run_id
+    assert message.metadata.session_key == "feishu:u200"
   end
 
   test "error egress 失败: 调用方可感知 EGRESS_ERROR" do
@@ -216,8 +288,8 @@ defmodule Men.Gateway.DispatchServerTest do
     assert error_result.code == "EGRESS_ERROR"
     assert error_result.reason == "egress send failed"
 
-    assert_receive {:egress_called, "feishu:u201", %ErrorMessage{} = message}
-    assert message.code == "BRIDGE_FAIL"
+    assert_receive {:egress_called, "feishu:u201", %EventMessage{event_type: :error} = message}
+    assert message.payload.code == "BRIDGE_FAIL"
   end
 
   test "重复 run_id: 返回 duplicate 且不重复 egress" do
@@ -232,11 +304,10 @@ defmodule Men.Gateway.DispatchServerTest do
     }
 
     assert {:ok, _result} = DispatchServer.dispatch(server, event)
-    assert_receive {:egress_called, "feishu:u300", %FinalMessage{}}
+    assert_receive {:egress_called, "feishu:u300", %EventMessage{event_type: :final}}
 
     assert {:ok, :duplicate} = DispatchServer.dispatch(server, event)
-    refute_receive {:egress_called, "feishu:u300", %FinalMessage{}}
-    refute_receive {:egress_called, "feishu:u300", %ErrorMessage{}}
+    refute_receive {:egress_called, "feishu:u300", %EventMessage{}}
   end
 
   test "egress 失败返回 EGRESS_ERROR 时不标记 processed，可同 run_id 重试" do
@@ -291,6 +362,65 @@ defmodule Men.Gateway.DispatchServerTest do
     assert_receive {:bridge_called, "turn-2", %{session_key: "feishu:u400:t:t01"}}
   end
 
+  test "并发 run 隔离: 交错 run 仅归属各自 run_id" do
+    server = start_dispatch_server()
+
+    event_a = %{
+      request_id: "req-iso-a",
+      run_id: "run-A",
+      payload: "stream_isolation_a",
+      channel: "dingtalk",
+      user_id: "u-iso"
+    }
+
+    event_b = %{
+      request_id: "req-iso-b",
+      run_id: "run-B",
+      payload: "stream_isolation_b",
+      channel: "dingtalk",
+      user_id: "u-iso"
+    }
+
+    tasks = [
+      Task.async(fn -> DispatchServer.dispatch(server, event_a) end),
+      Task.async(fn -> DispatchServer.dispatch(server, event_b) end)
+    ]
+
+    assert Enum.all?(Enum.map(tasks, &Task.await(&1, 2_000)), &match?({:ok, _}, &1))
+
+    received =
+      for _ <- 1..4 do
+        assert_receive {:egress_called, "dingtalk:u-iso", %EventMessage{} = message}
+        message
+      end
+
+    assert Enum.any?(received, &(&1.metadata.run_id == "run-A" and &1.payload.text in ["A1", "A-final"]))
+    assert Enum.any?(received, &(&1.metadata.run_id == "run-B" and &1.payload.text in ["B1", "B-final"]))
+
+    refute Enum.any?(received, fn message ->
+             (message.metadata.run_id == "run-A" and message.payload.text in ["B1", "B-final"]) or
+               (message.metadata.run_id == "run-B" and message.payload.text in ["A1", "A-final"])
+           end)
+  end
+
+  test "final 后拒收后续 delta" do
+    server = start_dispatch_server()
+
+    event = %{
+      request_id: "req-terminal-1",
+      run_id: "run-terminal-1",
+      payload: "final_then_delta",
+      channel: "dingtalk",
+      user_id: "u-terminal"
+    }
+
+    assert {:ok, _result} = DispatchServer.dispatch(server, event)
+
+    assert_receive {:egress_called, "dingtalk:u-terminal", %EventMessage{event_type: :final} = final}
+    assert final.payload.text == "done"
+    refute_receive {:egress_called, "dingtalk:u-terminal", %EventMessage{event_type: :delta}}
+  end
+
   test "同 run_id 并发提交: 只处理一次，其余命中 duplicate" do
     server = start_dispatch_server()
 
@@ -316,8 +446,26 @@ defmodule Men.Gateway.DispatchServerTest do
              _ -> false
            end) == 1
 
-    assert_receive {:egress_called, "feishu:u500", %FinalMessage{}}
-    refute_receive {:egress_called, "feishu:u500", %FinalMessage{}}
+    assert_receive {:egress_called, "feishu:u500", %EventMessage{event_type: :final}}
+    refute_receive {:egress_called, "feishu:u500", %EventMessage{event_type: :final}}
+  end
+
+  test "final-only 回归: chat_streaming_enabled=false 时忽略 delta" do
+    server = start_dispatch_server(chat_streaming_enabled: false)
+
+    event = %{
+      request_id: "req-fallback-1",
+      run_id: "run-fallback-1",
+      payload: "stream_ab",
+      channel: "dingtalk",
+      user_id: "u-fallback"
+    }
+
+    assert {:ok, _result} = DispatchServer.dispatch(server, event)
+
+    assert_receive {:egress_called, "dingtalk:u-fallback", %EventMessage{event_type: :final} = final}
+    assert final.payload.text == "ab"
+    refute_receive {:egress_called, "dingtalk:u-fallback", %EventMessage{event_type: :delta}}
   end
 
   test "enqueue 非阻塞：HTTP/Controller 可快速 ACK，后台继续执行" do
@@ -336,8 +484,11 @@ defmodule Men.Gateway.DispatchServerTest do
 
     assert duration_ms < 120
     assert_receive {:bridge_called, "slow", %{request_id: "req-async-1"}}, 1_000
-    assert_receive {:egress_called, "feishu:u-async", %FinalMessage{} = message}, 1_000
-    assert message.content == "ok:slow"
+
+    assert_receive {:egress_called, "feishu:u-async", %EventMessage{event_type: :final} = message},
+                   1_000
+
+    assert message.payload.text == "ok:slow"
   end
 
   test "关键边界输入: 非法 request_id / metadata 非 map / 路由字段不足" do
@@ -362,10 +513,10 @@ defmodule Men.Gateway.DispatchServerTest do
       assert error_result.reason == "invalid inbound event"
     end
 
-    assert_receive {:egress_called, _, %ErrorMessage{}}
-    assert_receive {:egress_called, _, %ErrorMessage{}}
-    assert_receive {:egress_called, _, %ErrorMessage{}}
-    assert_receive {:egress_called, _, %ErrorMessage{}}
+    assert_receive {:egress_called, _, %EventMessage{event_type: :error}}
+    assert_receive {:egress_called, _, %EventMessage{event_type: :error}}
+    assert_receive {:egress_called, _, %EventMessage{event_type: :error}}
+    assert_receive {:egress_called, _, %EventMessage{event_type: :error}}
     refute_receive {:bridge_called, _, _}
   end
 
@@ -409,6 +560,9 @@ defmodule Men.Gateway.DispatchServerTest do
     assert {:error, error_result} = DispatchServer.dispatch(server, event)
     assert error_result.code == "runtime_session_not_found"
     assert error_result.reason == "runtime session missing"
-    assert_receive {:egress_called, "feishu:u-race-2", %ErrorMessage{code: "runtime_session_not_found"}}
+
+    assert_receive {:egress_called, "feishu:u-race-2", %EventMessage{event_type: :error} = message}
+
+    assert message.payload.code == "runtime_session_not_found"
   end
 end

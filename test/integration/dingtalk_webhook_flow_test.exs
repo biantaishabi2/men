@@ -99,7 +99,7 @@ defmodule Men.Integration.DingtalkWebhookFlowTest do
     assert_receive {:bridge_called, prompt, _context}
 
     assert_receive {:egress_called, "dingtalk:user-integration",
-                    %Men.Channels.Egress.Messages.FinalMessage{}}
+                    %Men.Channels.Egress.Messages.EventMessage{event_type: :final}}
 
     assert Jason.decode!(prompt) == %{
              "channel" => "dingtalk",

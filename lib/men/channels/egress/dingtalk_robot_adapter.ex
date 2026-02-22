@@ -1,11 +1,12 @@
 defmodule Men.Channels.Egress.DingtalkRobotAdapter do
   @moduledoc """
-  钉钉机器人出站适配：将最终消息主动发送到钉钉机器人 webhook。
+  钉钉机器人出站适配：将统一事件主动发送到钉钉机器人 webhook。
   """
 
   @behaviour Men.Channels.Egress.Adapter
 
-  alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
+  alias Men.Channels.Egress.Messages
+  alias Men.Channels.Egress.Messages.{ErrorMessage, EventMessage, FinalMessage}
 
   defmodule HttpTransport do
     @moduledoc false
@@ -37,12 +38,22 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
   end
 
   @impl true
+  def send(_target, %EventMessage{} = message) do
+    send_text(build_event_text(message))
+  end
+
   def send(_target, %FinalMessage{} = message) do
-    send_text(build_final_text(message))
+    message
+    |> final_to_event_message()
+    |> build_event_text()
+    |> send_text()
   end
 
   def send(_target, %ErrorMessage{} = message) do
-    send_text(build_error_text(message))
+    message
+    |> error_to_event_message()
+    |> build_event_text()
+    |> send_text()
   end
 
   def send(_target, _message), do: {:error, :unsupported_message}
@@ -115,22 +126,86 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
 
   defp build_url(%{webhook_url: url}), do: {:ok, url}
 
-  defp build_final_text(%FinalMessage{} = message) do
+  defp final_to_event_message(%FinalMessage{} = message) do
+    %EventMessage{event_type: :final, payload: %{text: message.content}, metadata: message.metadata || %{}}
+  end
+
+  defp error_to_event_message(%ErrorMessage{} = message) do
+    %EventMessage{
+      event_type: :error,
+      payload: %{reason: message.reason, code: message.code},
+      metadata: message.metadata || %{}
+    }
+  end
+
+  defp build_event_text(%EventMessage{event_type: :delta} = message) do
+    run_id = metadata_value(message.metadata, :run_id, "unknown_run")
+    session_key = metadata_value(message.metadata, :session_key, "unknown_session")
+    "[delta][run_id=#{run_id} session_key=#{session_key}] #{payload_text(message.payload)}"
+  end
+
+  # final 保留 request/run 前缀格式，同时追加 session_key 归属信息。
+  defp build_event_text(%EventMessage{event_type: :final} = message) do
     request_id = metadata_value(message.metadata, :request_id, "unknown_request")
     run_id = metadata_value(message.metadata, :run_id, "unknown_run")
-    "[request_id=#{request_id} run_id=#{run_id}] #{message.content}"
+    session_key = metadata_value(message.metadata, :session_key, "unknown_session")
+
+    "[request_id=#{request_id} run_id=#{run_id} session_key=#{session_key}] #{payload_text(message.payload)}"
   end
 
-  defp build_error_text(%ErrorMessage{} = message) do
+  defp build_event_text(%EventMessage{event_type: :error} = message) do
     request_id = metadata_value(message.metadata, :request_id, "unknown_request")
     run_id = metadata_value(message.metadata, :run_id, "unknown_run")
-    code = if is_binary(message.code) and message.code != "", do: "[#{message.code}] ", else: ""
-    "[request_id=#{request_id} run_id=#{run_id}] #{code}#{message.reason}"
+    session_key = metadata_value(message.metadata, :session_key, "unknown_session")
+
+    code =
+      message.payload
+      |> payload_value(:code)
+      |> normalize_error_code()
+
+    reason =
+      payload_value(message.payload, :reason) ||
+        payload_value(message.payload, :message) ||
+        "dispatch failed"
+
+    prefix = if code == "", do: "[ERROR]", else: "[ERROR][#{code}]"
+
+    "[request_id=#{request_id} run_id=#{run_id} session_key=#{session_key}] #{prefix} #{reason}"
   end
 
-  defp metadata_value(metadata, key, default) when is_map(metadata) do
-    Map.get(metadata, key, Map.get(metadata, Atom.to_string(key), default))
+  defp build_event_text(%EventMessage{} = message) do
+    run_id = metadata_value(message.metadata, :run_id, "unknown_run")
+    session_key = metadata_value(message.metadata, :session_key, "unknown_session")
+    "[event=#{message.event_type} run_id=#{run_id} session_key=#{session_key}] #{inspect(message.payload)}"
   end
 
-  defp metadata_value(_metadata, _key, default), do: default
+  defp payload_text(payload) when is_binary(payload), do: payload
+
+  defp payload_text(payload) when is_map(payload) do
+    payload_value(payload, :text) ||
+      payload_value(payload, :content) ||
+      payload_value(payload, :message) ||
+      inspect(payload)
+  end
+
+  defp payload_text(payload), do: inspect(payload)
+
+  defp payload_value(payload, key) when is_map(payload) do
+    Map.get(payload, key) || Map.get(payload, Atom.to_string(key))
+  end
+
+  defp payload_value(_payload, _key), do: nil
+
+  defp normalize_error_code(nil), do: ""
+
+  defp normalize_error_code(code) when is_atom(code) do
+    code
+    |> Atom.to_string()
+    |> String.trim()
+  end
+
+  defp normalize_error_code(code) when is_binary(code), do: String.trim(code)
+  defp normalize_error_code(code), do: to_string(code)
+
+  defp metadata_value(metadata, key, default), do: Messages.metadata_value(metadata, key, default)
 end

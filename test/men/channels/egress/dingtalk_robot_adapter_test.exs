@@ -2,7 +2,7 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapterTest do
   use ExUnit.Case, async: true
 
   alias Men.Channels.Egress.DingtalkRobotAdapter
-  alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
+  alias Men.Channels.Egress.Messages.{ErrorMessage, EventMessage, FinalMessage}
 
   defmodule MockTransport do
     @behaviour Men.Channels.Egress.DingtalkRobotAdapter.HttpTransport
@@ -50,11 +50,11 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapterTest do
     :ok
   end
 
-  test "发送 FinalMessage 成功" do
-    message = %FinalMessage{
-      session_key: "dingtalk:u1",
-      content: "done",
-      metadata: %{request_id: "req-1", run_id: "run-1"}
+  test "发送 delta EventMessage 成功且包含 run/session" do
+    message = %EventMessage{
+      event_type: :delta,
+      payload: %{text: "chunk-a"},
+      metadata: %{request_id: "req-delta", run_id: "run-delta", session_key: "dingtalk:u1"}
     }
 
     assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", message)
@@ -63,29 +63,86 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapterTest do
     assert {"content-type", "application/json"} in headers
 
     decoded = Jason.decode!(body)
+    content = decoded["text"]["content"]
+
     assert decoded["msgtype"] == "text"
-    assert String.contains?(decoded["text"]["content"], "request_id=req-1")
-    assert String.contains?(decoded["text"]["content"], "run_id=run-1")
+    assert String.contains?(content, "[delta]")
+    assert String.contains?(content, "run_id=run-delta")
+    assert String.contains?(content, "session_key=dingtalk:u1")
+    assert String.contains?(content, "chunk-a")
   end
 
-  test "发送 ErrorMessage 成功并带 code" do
-    message = %ErrorMessage{
-      session_key: "dingtalk:u1",
-      reason: "bridge failed",
-      code: "BRIDGE_FAIL",
-      metadata: %{request_id: "req-2", run_id: "run-2"}
+  test "发送 final EventMessage 成功且保留前缀兼容" do
+    message = %EventMessage{
+      event_type: :final,
+      payload: %{text: "done"},
+      metadata: %{request_id: "req-final", run_id: "run-final", session_key: "dingtalk:u1"}
     }
 
     assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", message)
     assert_receive {:transport_post, _url, _headers, body}
+
     decoded = Jason.decode!(body)
-    assert String.contains?(decoded["text"]["content"], "[BRIDGE_FAIL]")
+    content = decoded["text"]["content"]
+
+    assert String.contains?(content, "request_id=req-final")
+    assert String.contains?(content, "run_id=run-final")
+    assert String.contains?(content, "session_key=dingtalk:u1")
+    assert String.contains?(content, "done")
+  end
+
+  test "发送 error EventMessage 成功并标准化错误文本" do
+    message = %EventMessage{
+      event_type: :error,
+      payload: %{reason: "timeout", code: "CLI_TIMEOUT"},
+      metadata: %{request_id: "req-error", run_id: "run-error", session_key: "dingtalk:u1"}
+    }
+
+    assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", message)
+    assert_receive {:transport_post, _url, _headers, body}
+
+    decoded = Jason.decode!(body)
+    content = decoded["text"]["content"]
+
+    assert String.contains?(content, "[ERROR][CLI_TIMEOUT]")
+    assert String.contains?(content, "timeout")
+    assert String.contains?(content, "run_id=run-error")
+    assert String.contains?(content, "session_key=dingtalk:u1")
+  end
+
+  test "兼容发送 FinalMessage 成功" do
+    message = %FinalMessage{
+      session_key: "dingtalk:u1",
+      content: "done",
+      metadata: %{request_id: "req-legacy-final", run_id: "run-legacy-final", session_key: "dingtalk:u1"}
+    }
+
+    assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", message)
+    assert_receive {:transport_post, _url, _headers, body}
+
+    decoded = Jason.decode!(body)
+    assert String.contains?(decoded["text"]["content"], "run_id=run-legacy-final")
+  end
+
+  test "兼容发送 ErrorMessage 成功" do
+    message = %ErrorMessage{
+      session_key: "dingtalk:u1",
+      reason: "bridge failed",
+      code: "BRIDGE_FAIL",
+      metadata: %{request_id: "req-legacy-error", run_id: "run-legacy-error", session_key: "dingtalk:u1"}
+    }
+
+    assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", message)
+    assert_receive {:transport_post, _url, _headers, body}
+
+    decoded = Jason.decode!(body)
+    assert String.contains?(decoded["text"]["content"], "[ERROR][BRIDGE_FAIL]")
   end
 
   test "钉钉业务错误会返回标准错误" do
     Application.put_env(:men, :dingtalk_robot_test_mode, :dingtalk_error)
 
-    message = %FinalMessage{session_key: "dingtalk:u1", content: "hello", metadata: %{}}
+    message = %EventMessage{event_type: :final, payload: %{text: "hello"}, metadata: %{}}
 
     assert {:error, {:dingtalk_error, 310_000, "invalid user"}} =
              DingtalkRobotAdapter.send("dingtalk:u1", message)
@@ -94,7 +151,7 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapterTest do
   test "HTTP 错误会返回标准错误" do
     Application.put_env(:men, :dingtalk_robot_test_mode, :http_error)
 
-    message = %FinalMessage{session_key: "dingtalk:u1", content: "hello", metadata: %{}}
+    message = %EventMessage{event_type: :final, payload: %{text: "hello"}, metadata: %{}}
 
     assert {:error, {:http_status, 500, %{"error" => "server error"}}} =
              DingtalkRobotAdapter.send("dingtalk:u1", message)
@@ -102,7 +159,9 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapterTest do
 
   test "缺少 webhook_url 时返回错误" do
     Application.put_env(:men, DingtalkRobotAdapter, transport: MockTransport, webhook_url: "")
-    message = %FinalMessage{session_key: "dingtalk:u1", content: "hello", metadata: %{}}
+
+    message = %EventMessage{event_type: :final, payload: %{text: "hello"}, metadata: %{}}
+
     assert {:error, :missing_webhook_url} = DingtalkRobotAdapter.send("dingtalk:u1", message)
   end
 end
