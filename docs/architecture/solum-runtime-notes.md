@@ -463,3 +463,108 @@ runtime_state:
 控制流 = 一个决策 GenServer。  
 数据流 = 一个共享状态服务。  
 两者只通过“消息 + frame 摘要”交互，不直接共享内部可变状态。
+
+## 补充：ETS 工具化与权限边界
+
+### 1. 工具命名建议
+
+数据流操作工具可直接命名为 `ets`（对 Agent 暴露统一入口），例如：
+
+1. `ets get <key>`
+2. `ets put <key> <json>`
+3. `ets ls --prefix <ns>`
+4. `ets query --prefix <ns> --contains <text>`
+5. `ets export --prefix <ns> --format ndjson`
+
+说明：
+1. 内部存储仍为 ETS。
+2. 命令行只是访问入口，最终由服务端模块执行业务校验与读写。
+
+### 2. 权限分层（必须服务端强制）
+
+1. 主 Agent（control-plane）
+- 可读写：`global.*`
+- 可读写：`agent.*`（含跨 agent 读取）
+- 可执行全局查询与导出
+
+2. 子 Agent（data-plane）
+- 只可读写：`agent.<id>.*`
+- 只可读取：必要的只读共享区（如 `shared.readonly.*`，可选）
+- 禁止写入：`global.*` 与其他 agent 命名空间
+
+关键约束：
+1. 权限判定在 Elixir 服务端做，不信任 CLI 调用方自报身份。
+2. 所有写操作记录审计日志（who/when/key/op）。
+
+### 3. 命名空间建议
+
+1. `global.control.*`：主 Agent 控制状态（仅主 Agent 写）。
+2. `agent.<id>.data.*`：子 Agent 私有数据区。
+3. `shared.evidence.*`：共享证据区（可配只读/受限写）。
+
+### 4. Bash 观测与检索方式
+
+由于 ETS 不是文件系统，不能直接 `grep` 内存；建议通过导出实现：
+
+1. `ets export --prefix agent.a1 --format ndjson | rg \"timeout|error\"`
+2. `ets export --prefix shared.evidence --format ndjson | jq ...`
+
+这样既保留 ETS 的并发与性能优势，也保留 Bash 工具链可观测性。
+
+## 补充：状态基座（ETS）+ 事件层（PubSub）协同
+
+### 1. 分工
+
+1. ETS：保存“当前可恢复状态”（持久化快照语义）。
+2. PubSub：传递“状态变化事件”（实时触发语义）。
+
+原则：
+1. 状态放 ETS，事件走 PubSub。
+2. 不用事件替代状态，不用状态轮询替代事件。
+
+### 2. Frame 装配流程
+
+1. 事件到达（tool_done / child_done / external_event / policy_changed）。
+2. 主 Agent 收到事件后，先更新 ETS 对应命名空间。
+3. 然后从 ETS 构建 `frame snapshot`（控制摘要 + 关键信号）。
+4. 将 frame 注入系统提示词，驱动下一步决策。
+
+### 3. 主/子 Agent 注入关系
+
+1. 主 Agent 可向子 Agent 注入受限 frame：
+- 任务目标片段
+- 允许的 skills
+- 局部控制约束（预算、边界、输出契约）
+
+2. 子 Agent 回流：
+- 结果写入 `agent.<id>.data.*` 或 `shared.evidence.*`
+- 并发布 `agent_result` 事件通知主 Agent
+
+3. 子 Agent 不直接修改主 Agent 控制区：
+- 禁止写 `global.control.*`
+- 主 Agent 根据回流证据自行更新控制状态
+
+### 4. 推荐事件主题（PubSub topic）
+
+1. `control:updated`
+2. `data:updated`
+3. `agent:<id>:result`
+4. `agent:<id>:error`
+5. `frame:rebuild`
+
+### 5. 最小事件协议（建议）
+
+```elixir
+%{
+  type: :agent_result | :tool_done | :external_event | :policy_changed,
+  source: "agent:a1",
+  scope: "agent.a1.data",
+  keys: ["agent.a1.data.findings"],
+  version: 42,
+  ts: 1_708_000_000_000
+}
+```
+
+说明：
+1. `version` 与 ETS 快照版本对齐，避免乱序消费。
+2. 主 Agent 处理事件时按 `version` 去重与重放保护。
