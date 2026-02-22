@@ -74,11 +74,18 @@ defmodule Men.Gateway.DispatchServer do
       storage_adapter:
         Keyword.get(opts, :storage_adapter, Keyword.get(config, :storage_adapter, :memory)),
       session_coordinator_enabled:
-        Keyword.get(opts, :session_coordinator_enabled, Keyword.get(coordinator_config, :enabled, true)),
-      session_coordinator_name:
-        Keyword.get(opts, :session_coordinator_name, SessionCoordinator),
+        Keyword.get(
+          opts,
+          :session_coordinator_enabled,
+          Keyword.get(coordinator_config, :enabled, true)
+        ),
+      session_coordinator_name: Keyword.get(opts, :session_coordinator_name, SessionCoordinator),
       session_rebuild_retry_enabled:
-        Keyword.get(opts, :session_rebuild_retry_enabled, Keyword.get(config, :session_rebuild_retry_enabled, true)),
+        Keyword.get(
+          opts,
+          :session_rebuild_retry_enabled,
+          Keyword.get(config, :session_rebuild_retry_enabled, true)
+        ),
       run_terminal_limit:
         Keyword.get(opts, :run_terminal_limit, Keyword.get(config, :run_terminal_limit, 1_000)),
       run_terminal_order: :queue.new(),
@@ -253,7 +260,8 @@ defmodule Men.Gateway.DispatchServer do
 
   defp do_start_turn(state, context) do
     with {:ok, prompt} <- payload_to_prompt(context.payload),
-         {:ok, run_context} <- resolve_runtime_context(state, context.session_key, context.run_id, 1) do
+         {:ok, run_context} <-
+           resolve_runtime_context(state, context.session_key, context.run_id, 1) do
       case call_bridge(state, prompt, context, run_context) do
         {:ok, payload} ->
           {:ok, payload, run_context}
@@ -284,7 +292,9 @@ defmodule Men.Gateway.DispatchServer do
 
   defp maybe_retry_start_turn(state, context, prompt, run_context, error_payload) do
     if should_retry_session_not_found?(state, run_context, error_payload) do
-      log_transition(:retry_triggered, context, run_context, %{code: Map.get(error_payload, :code)})
+      log_transition(:retry_triggered, context, run_context, %{
+        code: Map.get(error_payload, :code)
+      })
 
       case rebuild_runtime_context(state, context.session_key, context.run_id, 2) do
         {:ok, retry_context} ->
@@ -301,7 +311,12 @@ defmodule Men.Gateway.DispatchServer do
     end
   end
 
-  defp resolve_runtime_context(%{session_coordinator_enabled: false}, session_key, run_id, attempt) do
+  defp resolve_runtime_context(
+         %{session_coordinator_enabled: false},
+         session_key,
+         run_id,
+         attempt
+       ) do
     {:ok,
      %{
        run_id: run_id,
@@ -329,7 +344,12 @@ defmodule Men.Gateway.DispatchServer do
     {:ok, run_context}
   end
 
-  defp rebuild_runtime_context(%{session_coordinator_enabled: false}, session_key, run_id, attempt) do
+  defp rebuild_runtime_context(
+         %{session_coordinator_enabled: false},
+         session_key,
+         run_id,
+         attempt
+       ) do
     {:ok,
      %{
        run_id: run_id,
@@ -349,7 +369,12 @@ defmodule Men.Gateway.DispatchServer do
           attempt: attempt
         }
 
-        log_transition(:session_resolved, %{run_id: run_id, session_key: session_key}, run_context)
+        log_transition(
+          :session_resolved,
+          %{run_id: run_id, session_key: session_key},
+          run_context
+        )
+
         {:ok, run_context}
 
       {:error, reason} ->
@@ -397,8 +422,12 @@ defmodule Men.Gateway.DispatchServer do
     normalized_code == "session_not_found"
   end
 
-  defp normalize_error_code(code) when is_atom(code), do: code |> Atom.to_string() |> String.downcase()
-  defp normalize_error_code(code) when is_binary(code), do: code |> String.trim() |> String.downcase()
+  defp normalize_error_code(code) when is_atom(code),
+    do: code |> Atom.to_string() |> String.downcase()
+
+  defp normalize_error_code(code) when is_binary(code),
+    do: code |> String.trim() |> String.downcase()
+
   defp normalize_error_code(_), do: ""
 
   defp do_send_final(state, context, bridge_payload) do
@@ -451,7 +480,8 @@ defmodule Men.Gateway.DispatchServer do
 
     %{
       next_state
-      | session_last_context: Map.put(state.session_last_context, context.session_key, run_context),
+      | session_last_context:
+          Map.put(state.session_last_context, context.session_key, run_context),
         run_terminal_results: next_state.run_terminal_results,
         run_terminal_order: next_state.run_terminal_order
     }
@@ -487,7 +517,8 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   # egress 失败时不记录已处理，允许同 run_id 做恢复性重试。
-  defp maybe_mark_terminal(state, _context, _run_context, _reply, %{code: "EGRESS_ERROR"}), do: state
+  defp maybe_mark_terminal(state, _context, _run_context, _reply, %{code: "EGRESS_ERROR"}),
+    do: state
 
   defp maybe_mark_terminal(state, context, run_context, reply, _error_payload),
     do: mark_terminal(state, context, run_context, reply)

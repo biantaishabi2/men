@@ -49,7 +49,8 @@ defmodule Men.RuntimeBridge.GongRPC do
   def start_turn(prompt_text, context) when is_binary(prompt_text) and is_map(context) do
     request =
       %Request{
-        runtime_id: normalize_runtime_id(Map.get(context, :runtime_id) || Map.get(context, "runtime_id")),
+        runtime_id:
+          normalize_runtime_id(Map.get(context, :runtime_id) || Map.get(context, "runtime_id")),
         session_id:
           Map.get(context, :session_id) || Map.get(context, "session_id") ||
             Map.get(context, :session_key) || Map.get(context, "session_key"),
@@ -65,7 +66,11 @@ defmodule Men.RuntimeBridge.GongRPC do
         {:ok,
          %{
            text: normalize_payload_text(response.payload),
-           meta: Map.merge(metadata, %{runtime_id: response.runtime_id, session_key: response.session_id})
+           meta:
+             Map.merge(metadata, %{
+               runtime_id: response.runtime_id,
+               session_key: response.session_id
+             })
          }}
 
       {:error, %Error{} = error} ->
@@ -106,7 +111,15 @@ defmodule Men.RuntimeBridge.GongRPC do
       timeout_ms: timeout_ms
     }
 
-    rpc_result = apply(rpc_module, :call, [node_name, remote_module, remote_function, [rpc_payload], timeout_ms])
+    rpc_result =
+      apply(rpc_module, :call, [
+        node_name,
+        remote_module,
+        remote_function,
+        [rpc_payload],
+        timeout_ms
+      ])
+
     map_rpc_result(action, rpc_result, rpc_payload)
   rescue
     error ->
@@ -154,8 +167,14 @@ defmodule Men.RuntimeBridge.GongRPC do
 
   defp normalize_response(%{} = payload, request_payload) do
     %Response{
-      runtime_id: normalize_runtime_id(Map.get(payload, :runtime_id) || Map.get(payload, "runtime_id") || request_payload.runtime_id),
-      session_id: Map.get(payload, :session_id) || Map.get(payload, "session_id") || request_payload.session_id,
+      runtime_id:
+        normalize_runtime_id(
+          Map.get(payload, :runtime_id) || Map.get(payload, "runtime_id") ||
+            request_payload.runtime_id
+        ),
+      session_id:
+        Map.get(payload, :session_id) || Map.get(payload, "session_id") ||
+          request_payload.session_id,
       payload: Map.get(payload, :payload, Map.get(payload, "payload")),
       metadata:
         payload
@@ -197,7 +216,8 @@ defmodule Men.RuntimeBridge.GongRPC do
     }
   end
 
-  defp normalize_runtime_error(reason) when reason in [:timeout, :rpc_timeout], do: timeout_error() |> elem(1)
+  defp normalize_runtime_error(reason) when reason in [:timeout, :rpc_timeout],
+    do: timeout_error() |> elem(1)
 
   defp normalize_runtime_error(reason) do
     %Error{
@@ -240,7 +260,8 @@ defmodule Men.RuntimeBridge.GongRPC do
   defp default_target(:close), do: {Gong.Session, :close}
 
   defp resolve_timeout(timeout_ms, opts, config) do
-    timeout_ms || Keyword.get(opts, :timeout_ms) || Keyword.get(config, :rpc_timeout_ms, @default_timeout_ms)
+    timeout_ms || Keyword.get(opts, :timeout_ms) ||
+      Keyword.get(config, :rpc_timeout_ms, @default_timeout_ms)
   end
 
   defp normalize_runtime_id(value) when is_binary(value) and value != "", do: value

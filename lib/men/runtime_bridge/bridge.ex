@@ -28,7 +28,8 @@ defmodule Men.RuntimeBridge.Bridge do
   @callback prompt(Request.t(), opts :: keyword()) :: result()
   @callback close(Request.t(), opts :: keyword()) :: result()
 
-  @callback call(Request.t(), opts :: keyword()) :: {:ok, Response.t()} | {:error, ErrorResponse.t()}
+  @callback call(Request.t(), opts :: keyword()) ::
+              {:ok, Response.t()} | {:error, ErrorResponse.t()}
   @callback start_turn(prompt :: binary(), context :: turn_context()) ::
               {:ok, %{text: binary(), meta: map()}} | {:error, map()}
 
@@ -193,7 +194,8 @@ defmodule Men.RuntimeBridge.Bridge do
      }}
   end
 
-  defp normalize_start_turn_result({:error, error_payload}, _request) when is_map(error_payload) do
+  defp normalize_start_turn_result({:error, error_payload}, _request)
+       when is_map(error_payload) do
     code = error_payload |> Map.get(:code, :runtime_error) |> normalize_code()
 
     {:error,

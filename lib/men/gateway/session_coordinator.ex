@@ -30,13 +30,13 @@ defmodule Men.Gateway.SessionCoordinator do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  @spec get_or_create(binary(), (() -> binary())) :: {:ok, binary()} | {:error, term()}
+  @spec get_or_create(binary(), (-> binary())) :: {:ok, binary()} | {:error, term()}
   def get_or_create(session_key, create_fun)
       when is_binary(session_key) and is_function(create_fun, 0) do
     get_or_create(__MODULE__, session_key, create_fun)
   end
 
-  @spec get_or_create(GenServer.server(), binary(), (() -> binary())) ::
+  @spec get_or_create(GenServer.server(), binary(), (-> binary())) ::
           {:ok, binary()} | {:error, term()}
   def get_or_create(server, session_key, create_fun)
       when is_binary(session_key) and is_function(create_fun, 0) do
@@ -91,7 +91,10 @@ defmodule Men.Gateway.SessionCoordinator do
 
     invalidation_codes =
       opts
-      |> Keyword.get(:invalidation_codes, Keyword.get(config, :invalidation_codes, @default_invalidation_codes))
+      |> Keyword.get(
+        :invalidation_codes,
+        Keyword.get(config, :invalidation_codes, @default_invalidation_codes)
+      )
       |> normalize_invalidation_codes()
 
     state = %{
@@ -135,13 +138,18 @@ defmodule Men.Gateway.SessionCoordinator do
   @impl true
   def handle_call({:invalidate_by_session_key, reason}, _from, state) do
     reply =
-      with {:ok, session_key, code, runtime_session_id} <- normalize_reason_by_session_key(state, reason),
+      with {:ok, session_key, code, runtime_session_id} <-
+             normalize_reason_by_session_key(state, reason),
            :ok <- ensure_invalidation_code(state, code) do
         case lookup_entry(state, session_key) do
           {:ok, entry} ->
             if runtime_session_id in [nil, entry.runtime_session_id] do
               delete_entry(state, entry)
-              Logger.info("gateway session invalidated by session_key=#{session_key} code=#{code}")
+
+              Logger.info(
+                "gateway session invalidated by session_key=#{session_key} code=#{code}"
+              )
+
               :ok
             else
               :not_found
@@ -161,7 +169,8 @@ defmodule Men.Gateway.SessionCoordinator do
   @impl true
   def handle_call({:invalidate_by_runtime_session_id, reason}, _from, state) do
     reply =
-      with {:ok, runtime_session_id, code, session_key} <- normalize_reason_by_runtime_id(state, reason),
+      with {:ok, runtime_session_id, code, session_key} <-
+             normalize_reason_by_runtime_id(state, reason),
            :ok <- ensure_invalidation_code(state, code) do
         case lookup_session_key_by_runtime_id(state, runtime_session_id) do
           {:ok, actual_session_key} ->
@@ -169,7 +178,11 @@ defmodule Men.Gateway.SessionCoordinator do
               case lookup_entry(state, actual_session_key) do
                 {:ok, entry} ->
                   delete_entry(state, entry)
-                  Logger.info("gateway session invalidated by runtime_session_id=#{runtime_session_id} code=#{code}")
+
+                  Logger.info(
+                    "gateway session invalidated by runtime_session_id=#{runtime_session_id} code=#{code}"
+                  )
+
                   :ok
 
                 :not_found ->
@@ -380,7 +393,10 @@ defmodule Men.Gateway.SessionCoordinator do
        when is_binary(runtime_session_id) and is_binary(session_key),
        do: {:ok, runtime_session_id, normalize_code(code), session_key}
 
-  defp normalize_reason_by_runtime_id(_state, %{runtime_session_id: runtime_session_id, code: code})
+  defp normalize_reason_by_runtime_id(_state, %{
+         runtime_session_id: runtime_session_id,
+         code: code
+       })
        when is_binary(runtime_session_id),
        do: {:ok, runtime_session_id, normalize_code(code), nil}
 
@@ -401,7 +417,8 @@ defmodule Men.Gateway.SessionCoordinator do
     |> MapSet.new()
   end
 
-  defp normalize_invalidation_codes(_), do: normalize_invalidation_codes(@default_invalidation_codes)
+  defp normalize_invalidation_codes(_),
+    do: normalize_invalidation_codes(@default_invalidation_codes)
 
   defp normalize_code(code) when is_atom(code), do: code |> Atom.to_string() |> String.downcase()
   defp normalize_code(code) when is_binary(code), do: code |> String.trim() |> String.downcase()

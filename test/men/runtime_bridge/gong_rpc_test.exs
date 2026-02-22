@@ -57,7 +57,8 @@ defmodule Men.RuntimeBridge.GongRPCTest do
        }}
     end
 
-    def prompt(%{payload: "unknown_code"}), do: {:error, %{"code" => "NEW_REMOTE_ERROR", "message" => "new"}}
+    def prompt(%{payload: "unknown_code"}),
+      do: {:error, %{"code" => "NEW_REMOTE_ERROR", "message" => "new"}}
 
     def prompt(%{session_id: "missing"}) do
       {:error,
@@ -115,10 +116,12 @@ defmodule Men.RuntimeBridge.GongRPCTest do
 
     Application.put_env(:men, :gong_rpc_test_pid, self())
 
-    Application.put_env(:men, :runtime_bridge,
+    Application.put_env(
+      :men,
+      :runtime_bridge,
       original_runtime_bridge
       |> Keyword.put(:rpc_module, FakeRPC)
-      |> Keyword.put(:gong_node, :"gong@test")
+      |> Keyword.put(:gong_node, :gong@test)
       |> Keyword.put(:rpc_timeout_ms, 120)
       |> Keyword.put(:rpc_target, %{
         open: {FakeRemote, :open},
@@ -150,9 +153,9 @@ defmodule Men.RuntimeBridge.GongRPCTest do
     assert {:ok, %Response{} = close_response} = GongRPC.close(close_request)
     assert close_response.payload == :closed
 
-    assert_receive {:rpc_called, :"gong@test", FakeRemote, :open, _, 120}
-    assert_receive {:rpc_called, :"gong@test", FakeRemote, :prompt, _, 120}
-    assert_receive {:rpc_called, :"gong@test", FakeRemote, :close, _, 120}
+    assert_receive {:rpc_called, :gong@test, FakeRemote, :open, _, 120}
+    assert_receive {:rpc_called, :gong@test, FakeRemote, :prompt, _, 120}
+    assert_receive {:rpc_called, :gong@test, FakeRemote, :close, _, 120}
   end
 
   test "session_not_found 映射为 retryable=true 的统一错误" do
@@ -165,7 +168,12 @@ defmodule Men.RuntimeBridge.GongRPCTest do
   end
 
   test "RPC 超时映射为 timeout 且不泄漏底层格式" do
-    request = %Request{runtime_id: "gong", session_id: "sess-timeout", payload: "rpc_timeout", timeout_ms: 50}
+    request = %Request{
+      runtime_id: "gong",
+      session_id: "sess-timeout",
+      payload: "rpc_timeout",
+      timeout_ms: 50
+    }
 
     assert {:error, %Error{} = error} = GongRPC.prompt(request)
     assert error.code == :timeout
@@ -174,8 +182,17 @@ defmodule Men.RuntimeBridge.GongRPCTest do
   end
 
   test "传输错误与运行时错误映射稳定" do
-    transport_request = %Request{runtime_id: "gong", session_id: "sess-transport", payload: "transport_error"}
-    runtime_request = %Request{runtime_id: "gong", session_id: "sess-runtime", payload: "rpc_error"}
+    transport_request = %Request{
+      runtime_id: "gong",
+      session_id: "sess-transport",
+      payload: "transport_error"
+    }
+
+    runtime_request = %Request{
+      runtime_id: "gong",
+      session_id: "sess-runtime",
+      payload: "rpc_error"
+    }
 
     assert {:error, %Error{} = transport_error} = GongRPC.prompt(transport_request)
     assert transport_error.code == :transport_error
@@ -203,8 +220,11 @@ defmodule Men.RuntimeBridge.GongRPCTest do
     assert first_result.payload == "reply:hello"
     assert second_result.payload == "reply:hello"
 
-    assert_receive {:rpc_called, :"gong@test", FakeRemote, :prompt, %{session_id: "sess-restart"}, 120}
-    assert_receive {:rpc_called, :"gong@test", FakeRemote, :prompt, %{session_id: "sess-restart"}, 120}
+    assert_receive {:rpc_called, :gong@test, FakeRemote, :prompt, %{session_id: "sess-restart"},
+                    120}
+
+    assert_receive {:rpc_called, :gong@test, FakeRemote, :prompt, %{session_id: "sess-restart"},
+                    120}
   end
 
   defp invoke_in_worker(request) do
@@ -229,7 +249,10 @@ defmodule Men.RuntimeBridge.GongRPCTest do
 
     results =
       1..12
-      |> Task.async_stream(fn _ -> GongRPC.prompt(request) end, timeout: 1_000, max_concurrency: 12)
+      |> Task.async_stream(fn _ -> GongRPC.prompt(request) end,
+        timeout: 1_000,
+        max_concurrency: 12
+      )
       |> Enum.to_list()
 
     assert Enum.all?(results, fn
@@ -238,7 +261,8 @@ defmodule Men.RuntimeBridge.GongRPCTest do
            end)
 
     for _ <- 1..12 do
-      assert_receive {:rpc_called, :"gong@test", FakeRemote, :prompt, %{session_id: "sess-concurrent"}, 120}
+      assert_receive {:rpc_called, :gong@test, FakeRemote, :prompt,
+                      %{session_id: "sess-concurrent"}, 120}
     end
   end
 
@@ -251,12 +275,18 @@ defmodule Men.RuntimeBridge.GongRPCTest do
   end
 
   test "nil 与极值边界以及深层 payload 可稳定处理" do
-    nil_request = %Request{runtime_id: "gong", session_id: "sess-nil", payload: nil, timeout_ms: 0}
+    nil_request = %Request{
+      runtime_id: "gong",
+      session_id: "sess-nil",
+      payload: nil,
+      timeout_ms: 0
+    }
+
     deep_payload = %{deep: %{level1: %{level2: [1, 2, %{k: "v"}]}}}
     deep_request = %Request{runtime_id: "gong", session_id: "sess-deep", payload: deep_payload}
 
     assert {:ok, %Response{payload: "reply:"}} = GongRPC.prompt(nil_request)
-    assert_receive {:rpc_called, :"gong@test", FakeRemote, :prompt, %{timeout_ms: 0}, 0}
+    assert_receive {:rpc_called, :gong@test, FakeRemote, :prompt, %{timeout_ms: 0}, 0}
 
     assert {:ok, %Response{payload: ^deep_payload}} = GongRPC.prompt(deep_request)
   end

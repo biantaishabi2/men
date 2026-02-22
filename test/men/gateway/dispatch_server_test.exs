@@ -128,10 +128,7 @@ defmodule Men.Gateway.DispatchServerTest do
       session_coordinator_enabled: false
     ]
 
-    start_supervised!(
-      {DispatchServer,
-       Keyword.merge(default_opts, opts)}
-    )
+    start_supervised!({DispatchServer, Keyword.merge(default_opts, opts)})
   end
 
   defp start_session_coordinator(opts \\ []) do
@@ -247,8 +244,18 @@ defmodule Men.Gateway.DispatchServerTest do
     assert result1.session_key == "feishu:u400:t:t01"
     assert result2.session_key == "feishu:u400:t:t01"
 
-    assert_receive {:bridge_called, "turn-1", %{session_key: runtime_session_id_1, external_session_key: "feishu:u400:t:t01"}}
-    assert_receive {:bridge_called, "turn-2", %{session_key: runtime_session_id_2, external_session_key: "feishu:u400:t:t01"}}
+    assert_receive {:bridge_called, "turn-1",
+                    %{
+                      session_key: runtime_session_id_1,
+                      external_session_key: "feishu:u400:t:t01"
+                    }}
+
+    assert_receive {:bridge_called, "turn-2",
+                    %{
+                      session_key: runtime_session_id_2,
+                      external_session_key: "feishu:u400:t:t01"
+                    }}
+
     assert runtime_session_id_1 == runtime_session_id_2
   end
 
@@ -272,8 +279,12 @@ defmodule Men.Gateway.DispatchServerTest do
     assert {:ok, result} = DispatchServer.dispatch(server, event)
     assert result.run_id == "run-heal-1"
 
-    assert_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1", session_key: runtime_session_id_1}}
-    assert_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1", session_key: runtime_session_id_2}}
+    assert_receive {:bridge_called, "session_not_found_once",
+                    %{run_id: "run-heal-1", session_key: runtime_session_id_1}}
+
+    assert_receive {:bridge_called, "session_not_found_once",
+                    %{run_id: "run-heal-1", session_key: runtime_session_id_2}}
+
     assert runtime_session_id_1 != runtime_session_id_2
 
     assert_receive {:egress_called, "feishu:u-heal", %FinalMessage{}}
