@@ -28,7 +28,8 @@ defmodule Men.RuntimeBridge.Bridge do
   @callback prompt(Request.t(), opts :: keyword()) :: result()
   @callback close(Request.t(), opts :: keyword()) :: result()
 
-  @callback call(Request.t(), opts :: keyword()) :: {:ok, Response.t()} | {:error, ErrorResponse.t()}
+  @callback call(Request.t(), opts :: keyword()) ::
+              {:ok, Response.t()} | {:error, ErrorResponse.t()}
   @callback start_turn(prompt :: binary(), context :: turn_context()) ::
               {:ok, %{text: binary(), meta: map()}} | {:error, map()}
 
@@ -77,7 +78,7 @@ defmodule Men.RuntimeBridge.Bridge do
             {:error, to_legacy_error_response(error, request)}
         end
 
-      function_exported?(adapter, :call, 2) ->
+      adapter_function_exported?(adapter, :call, 2) ->
         adapter.call(request, opts)
 
       true ->
@@ -105,7 +106,7 @@ defmodule Men.RuntimeBridge.Bridge do
         |> prompt(opts)
         |> to_legacy_start_turn_result(prompt_text, context_map)
 
-      function_exported?(adapter, :start_turn, 2) ->
+      adapter_function_exported?(adapter, :start_turn, 2) ->
         adapter.start_turn(prompt_text, context_map)
 
       true ->
@@ -126,12 +127,12 @@ defmodule Men.RuntimeBridge.Bridge do
     adapter = resolve_adapter(opts)
 
     cond do
-      function_exported?(adapter, action, 2) ->
+      adapter_function_exported?(adapter, action, 2) ->
         adapter
         |> apply(action, [request, opts])
         |> normalize_result(request)
 
-      action == :prompt and function_exported?(adapter, :start_turn, 2) ->
+      action == :prompt and adapter_function_exported?(adapter, :start_turn, 2) ->
         request
         |> prompt_to_legacy_context()
         |> then(fn {prompt_text, context} ->
@@ -193,7 +194,8 @@ defmodule Men.RuntimeBridge.Bridge do
      }}
   end
 
-  defp normalize_start_turn_result({:error, error_payload}, _request) when is_map(error_payload) do
+  defp normalize_start_turn_result({:error, error_payload}, _request)
+       when is_map(error_payload) do
     code = error_payload |> Map.get(:code, :runtime_error) |> normalize_code()
 
     {:error,
@@ -230,15 +232,21 @@ defmodule Men.RuntimeBridge.Bridge do
   end
 
   defp to_legacy_start_turn_result({:error, %Error{} = error}, _prompt_text, context_map) do
+    error_type =
+      case normalize_code(error.code) do
+        :timeout -> :timeout
+        _ -> :failed
+      end
+
     {:error,
      %{
-       type: :failed,
+       type: error_type,
        code: Atom.to_string(error.code),
        message: error.message,
        run_id: Map.get(context_map, :run_id),
        request_id: Map.get(context_map, :request_id),
        session_key: Map.get(context_map, :session_key),
-       details: error.context
+       details: Map.put(error.context || %{}, :retryable, error.retryable)
      }}
   end
 
@@ -301,6 +309,10 @@ defmodule Men.RuntimeBridge.Bridge do
     timeout_ms || Keyword.get(opts, :timeout_ms) || runtime_config()[:timeout_ms]
   end
 
+  defp adapter_function_exported?(adapter, function_name, arity) do
+    Code.ensure_loaded?(adapter) and function_exported?(adapter, function_name, arity)
+  end
+
   defp runtime_config, do: Application.get_env(:men, :runtime_bridge, [])
   defp dispatch_server_config, do: Application.get_env(:men, Men.Gateway.DispatchServer, [])
 
@@ -313,6 +325,7 @@ defmodule Men.RuntimeBridge.Bridge do
     |> String.replace(~r/[^a-z0-9]+/, "_")
     |> case do
       "timeout" -> :timeout
+      "invalid_argument" -> :invalid_argument
       "session_not_found" -> :session_not_found
       "transport_error" -> :transport_error
       "runtime_error" -> :runtime_error
