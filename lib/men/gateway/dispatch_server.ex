@@ -21,6 +21,8 @@ defmodule Men.Gateway.DispatchServer do
           session_coordinator_enabled: boolean(),
           session_coordinator_name: GenServer.server(),
           session_rebuild_retry_enabled: boolean(),
+          run_terminal_limit: pos_integer(),
+          run_terminal_order: :queue.queue(binary()),
           processed_run_ids: MapSet.t(binary()),
           session_last_context: %{optional(binary()) => Types.run_context()},
           run_terminal_results: %{optional(binary()) => terminal_reply()}
@@ -78,6 +80,9 @@ defmodule Men.Gateway.DispatchServer do
         Keyword.get(opts, :session_coordinator_name, SessionCoordinator),
       session_rebuild_retry_enabled:
         Keyword.get(opts, :session_rebuild_retry_enabled, Keyword.get(config, :session_rebuild_retry_enabled, true)),
+      run_terminal_limit:
+        Keyword.get(opts, :run_terminal_limit, Keyword.get(config, :run_terminal_limit, 1_000)),
+      run_terminal_order: :queue.new(),
       processed_run_ids: MapSet.new(),
       session_last_context: %{},
       run_terminal_results: %{}
@@ -391,7 +396,7 @@ defmodule Men.Gateway.DispatchServer do
 
   defp retryable_session_not_found_code?(code) do
     normalized_code = normalize_error_code(code)
-    normalized_code in ["session_not_found", "runtime_session_not_found"]
+    normalized_code == "session_not_found"
   end
 
   defp normalize_error_code(code) when is_atom(code), do: code |> Atom.to_string() |> String.downcase()
@@ -444,12 +449,44 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   defp mark_terminal(state, context, run_context, reply) do
+    next_state = put_terminal_result(state, context.run_id, reply)
+
     %{
-      state
+      next_state
       | processed_run_ids: MapSet.put(state.processed_run_ids, context.run_id),
         session_last_context: Map.put(state.session_last_context, context.session_key, run_context),
-        run_terminal_results: Map.put(state.run_terminal_results, context.run_id, reply)
+        run_terminal_results: next_state.run_terminal_results,
+        run_terminal_order: next_state.run_terminal_order
     }
+  end
+
+  defp put_terminal_result(state, run_id, reply) do
+    if Map.has_key?(state.run_terminal_results, run_id) do
+      %{state | run_terminal_results: Map.put(state.run_terminal_results, run_id, reply)}
+    else
+      state
+      |> Map.update!(:run_terminal_results, &Map.put(&1, run_id, reply))
+      |> Map.update!(:run_terminal_order, &:queue.in(run_id, &1))
+      |> evict_terminal_results()
+    end
+  end
+
+  # 终态缓存为幂等兜底，不追求永久保留；采用 FIFO 控制内存上界。
+  defp evict_terminal_results(state) do
+    if map_size(state.run_terminal_results) <= state.run_terminal_limit do
+      state
+    else
+      case :queue.out(state.run_terminal_order) do
+        {{:value, oldest_run_id}, next_order} ->
+          state
+          |> Map.put(:run_terminal_order, next_order)
+          |> Map.update!(:run_terminal_results, &Map.delete(&1, oldest_run_id))
+          |> evict_terminal_results()
+
+        {:empty, _queue} ->
+          state
+      end
+    end
   end
 
   # egress 失败时不记录已处理，允许同 run_id 做恢复性重试。

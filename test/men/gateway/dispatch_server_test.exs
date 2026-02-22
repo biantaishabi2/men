@@ -281,7 +281,7 @@ defmodule Men.Gateway.DispatchServerTest do
     refute_receive {:egress_called, "feishu:u-heal", %ErrorMessage{}}
   end
 
-  test "非 session_not_found 错误不重试" do
+  test "runtime_session_not_found 不重试" do
     coordinator_name = start_session_coordinator()
 
     server =
@@ -293,18 +293,59 @@ defmodule Men.Gateway.DispatchServerTest do
     event = %{
       request_id: "req-no-retry-1",
       run_id: "run-no-retry-1",
-      payload: "bridge_error",
+      payload: "runtime_session_not_found",
       channel: "feishu",
       user_id: "u-no-retry"
     }
 
     assert {:error, error_result} = DispatchServer.dispatch(server, event)
-    assert error_result.code == "BRIDGE_FAIL"
-    assert_receive {:bridge_called, "bridge_error", %{run_id: "run-no-retry-1"}}
-    refute_receive {:bridge_called, "bridge_error", %{run_id: "run-no-retry-1"}}
+    assert error_result.code == "runtime_session_not_found"
+    assert_receive {:bridge_called, "runtime_session_not_found", %{run_id: "run-no-retry-1"}}
+    refute_receive {:bridge_called, "runtime_session_not_found", %{run_id: "run-no-retry-1"}}
 
     assert_receive {:egress_called, "feishu:u-no-retry", %ErrorMessage{} = message}
-    assert message.code == "BRIDGE_FAIL"
+    assert message.code == "runtime_session_not_found"
+  end
+
+  test "run 终态缓存超过上限后淘汰最旧 run_id" do
+    server = start_dispatch_server(run_terminal_limit: 2)
+
+    event_1 = %{
+      request_id: "req-cache-1",
+      run_id: "run-cache-1",
+      payload: "cache-1",
+      channel: "feishu",
+      user_id: "u-cache"
+    }
+
+    event_2 = %{
+      request_id: "req-cache-2",
+      run_id: "run-cache-2",
+      payload: "cache-2",
+      channel: "feishu",
+      user_id: "u-cache"
+    }
+
+    event_3 = %{
+      request_id: "req-cache-3",
+      run_id: "run-cache-3",
+      payload: "cache-3",
+      channel: "feishu",
+      user_id: "u-cache"
+    }
+
+    assert {:ok, _} = DispatchServer.dispatch(server, event_1)
+    assert_receive {:bridge_called, "cache-1", %{run_id: "run-cache-1"}}
+    assert {:ok, _} = DispatchServer.dispatch(server, event_2)
+    assert_receive {:bridge_called, "cache-2", %{run_id: "run-cache-2"}}
+    assert {:ok, _} = DispatchServer.dispatch(server, event_3)
+    assert_receive {:bridge_called, "cache-3", %{run_id: "run-cache-3"}}
+
+    assert {:ok, _} = DispatchServer.dispatch(server, event_2)
+    refute_receive {:bridge_called, "cache-2", %{run_id: "run-cache-2"}}
+
+    assert {:ok, _} = DispatchServer.dispatch(server, event_1)
+    assert_receive {:bridge_called, "cache-1", %{run_id: "run-cache-1"}}
   end
 
   test "run_id 幂等命中终态缓存且不重复出站" do
