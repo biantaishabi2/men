@@ -111,4 +111,45 @@ defmodule Men.Gateway.Runtime.ModeStateMachineTest do
     assert mode_2 == :research
     assert meta_2.reason == :premise_invalidated
   end
+
+  test "滞回：plan 态置信度跌破 exit_threshold 时回退 research" do
+    context = ModeStateMachine.initial_context()
+
+    {mode, _context, meta} =
+      ModeStateMachine.decide(
+        :plan,
+        %{key_claim_confidence: 0.59, blocking_count: 0},
+        context,
+        %{exit_threshold: 0.60}
+      )
+
+    assert mode == :research
+    assert meta.reason == :confidence_below_exit_threshold
+  end
+
+  test "配置合并：env 缺失键时保留 override 覆盖值" do
+    old_env = Application.get_env(:men, ModeStateMachine)
+    Application.put_env(:men, ModeStateMachine, %{enter_threshold: 0.75})
+
+    on_exit(fn ->
+      if is_nil(old_env) do
+        Application.delete_env(:men, ModeStateMachine)
+      else
+        Application.put_env(:men, ModeStateMachine, old_env)
+      end
+    end)
+
+    context = ModeStateMachine.initial_context()
+
+    {mode, _context, meta} =
+      ModeStateMachine.decide(
+        :research,
+        %{blocking_count: 0, key_claim_confidence: 0.65, graph_change_rate: 0.01},
+        context,
+        %{exit_threshold: 0.70, stable_window_ticks: 1}
+      )
+
+    assert mode == :research
+    assert meta.hysteresis_state.exit_threshold == 0.70
+  end
 end

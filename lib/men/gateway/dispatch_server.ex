@@ -444,6 +444,8 @@ defmodule Men.Gateway.DispatchServer do
     {inserted_backfill_tasks, mode_backfill_dedup_keys} =
       dedup_backfill_tasks(backfill_tasks, state.mode_backfill_dedup_keys)
 
+    queued_backfill_tasks = enqueue_backfill_tasks(inserted_backfill_tasks, state.inbox_store_opts)
+
     transition_event = %{
       transition_id: transition_id,
       from_mode: decision_meta.from_mode,
@@ -454,7 +456,7 @@ defmodule Men.Gateway.DispatchServer do
       snapshot_digest: snapshot_digest(snapshot),
       hysteresis_state: decision_meta.hysteresis_state,
       cooldown_remaining: decision_meta.cooldown_remaining,
-      inserted_backfill_tasks: inserted_backfill_tasks
+      inserted_backfill_tasks: queued_backfill_tasks
     }
 
     publish_mode_transition(state.mode_transition_topic, transition_event)
@@ -520,6 +522,49 @@ defmodule Men.Gateway.DispatchServer do
       end
     end)
     |> then(fn {inserted, keys} -> {Enum.reverse(inserted), keys} end)
+  end
+
+  defp enqueue_backfill_tasks(tasks, inbox_store_opts) do
+    Enum.reduce(tasks, [], fn task, acc ->
+      envelope = build_backfill_envelope(task)
+
+      case InboxStore.put(envelope, inbox_store_opts) do
+        {:ok, _} ->
+          [task | acc]
+
+        {:duplicate, _} ->
+          acc
+
+        {:stale, _} ->
+          acc
+
+        {:error, reason} ->
+          Logger.warning(
+            "mode backfill enqueue failed transition_id=#{task.transition_id} " <>
+              "premise_id=#{task.premise_id} reason=#{inspect(reason)}"
+          )
+
+          acc
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  defp build_backfill_envelope(task) do
+    %EventEnvelope{
+      type: "mode_backfill",
+      source: "mode_state_machine",
+      target: "runtime",
+      event_id: "#{task.transition_id}:#{task.premise_id}",
+      version: 0,
+      wake: false,
+      inbox_only: true,
+      force_wake: false,
+      ets_keys: ["mode_backfill", task.transition_id, task.premise_id],
+      payload: task,
+      ts: System.system_time(:millisecond),
+      meta: %{transition_id: task.transition_id, premise_id: task.premise_id}
+    }
   end
 
   defp publish_mode_transition(topic, transition_event) do

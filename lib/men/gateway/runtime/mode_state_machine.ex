@@ -135,12 +135,22 @@ defmodule Men.Gateway.Runtime.ModeStateMachine do
     end
   end
 
-  defp decide_by_mode(:plan, snapshot, _context, _config) do
-    if truthy?(Map.get(snapshot, :plan_selected)) and
-         truthy?(Map.get(snapshot, :execute_compilable)) do
-      {:execute, :plan_ready_for_execution, :normal}
-    else
-      {:plan, :plan_not_ready_for_execution, nil}
+  defp decide_by_mode(:plan, snapshot, _context, config) do
+    blocking_count = normalize_non_neg_int(Map.get(snapshot, :blocking_count, 0))
+
+    cond do
+      blocking_count > 0 ->
+        {:research, :blocking_present, :low}
+
+      confidence_below_exit_threshold?(snapshot, config.exit_threshold) ->
+        {:research, :confidence_below_exit_threshold, :low}
+
+      truthy?(Map.get(snapshot, :plan_selected)) and
+          truthy?(Map.get(snapshot, :execute_compilable)) ->
+        {:execute, :plan_ready_for_execution, :normal}
+
+      true ->
+        {:plan, :plan_not_ready_for_execution, nil}
     end
   end
 
@@ -262,6 +272,13 @@ defmodule Men.Gateway.Runtime.ModeStateMachine do
     end
   end
 
+  defp confidence_below_exit_threshold?(snapshot, exit_threshold) do
+    case Map.fetch(snapshot, :key_claim_confidence) do
+      {:ok, confidence} -> normalize_float(confidence) < exit_threshold
+      :error -> false
+    end
+  end
+
   defp resolve_config(overrides) do
     env =
       :men
@@ -279,14 +296,15 @@ defmodule Men.Gateway.Runtime.ModeStateMachine do
 
     Enum.reduce(@required_keys, merged, fn key, acc ->
       configured_in_env? = Map.has_key?(env, key)
+      configured_in_override? = Map.has_key?(override_map, key)
       nil_override? = Map.has_key?(override_map, key) and is_nil(Map.get(override_map, key))
 
       cond do
-        should_warn_env? and not configured_in_env? ->
+        nil_override? ->
           warn_missing_config(key, Map.get(@defaults, key))
           Map.put(acc, key, Map.get(@defaults, key))
 
-        nil_override? ->
+        should_warn_env? and not configured_in_env? and not configured_in_override? ->
           warn_missing_config(key, Map.get(@defaults, key))
           Map.put(acc, key, Map.get(@defaults, key))
 

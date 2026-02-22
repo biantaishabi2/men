@@ -2,6 +2,7 @@ defmodule Men.Gateway.DispatchServerModeSwitchTest do
   use ExUnit.Case, async: false
 
   alias Men.Gateway.DispatchServer
+  alias Men.Gateway.InboxStore
 
   defmodule MockBridge do
     @behaviour Men.RuntimeBridge.Bridge
@@ -19,6 +20,7 @@ defmodule Men.Gateway.DispatchServerModeSwitchTest do
   end
 
   setup do
+    InboxStore.reset()
     Phoenix.PubSub.subscribe(Men.PubSub, "mode_transitions")
     :ok
   end
@@ -115,6 +117,12 @@ defmodule Men.Gateway.DispatchServerModeSwitchTest do
     [task] = transition.inserted_backfill_tasks
     assert task.transition_id == transition.transition_id
     assert task.premise_id == "premise-1"
+
+    assert {:ok, envelope} =
+             InboxStore.latest_by_ets_keys(["mode_backfill", transition.transition_id, "premise-1"])
+
+    assert envelope.type == "mode_backfill"
+    assert envelope.payload.premise_id == "premise-1"
   end
 
   test "边界：抖动超限降级为 research-only 并在恢复窗口后恢复" do
@@ -175,5 +183,47 @@ defmodule Men.Gateway.DispatchServerModeSwitchTest do
              })
 
     assert_receive {:mode_transitioned, %{from_mode: :research, to_mode: :plan}}
+  end
+
+  test "并发 dispatch：状态机上下文推进稳定且回退补链仅入队一次" do
+    server =
+      start_dispatch_server(
+        mode_state_machine_mode: :execute,
+        mode_state_machine_options: %{cooldown_ticks: 0}
+      )
+
+    1..2
+    |> Task.async_stream(
+      fn idx ->
+        dispatch_with_signals(server, "req-c-#{idx}", "p-c-#{idx}", %{
+          premise_invalidated: true,
+          invalidated_premise_ids: ["premise-c", "premise-c"],
+          critical_paths_by_premise: %{"premise-c" => ["path-a", "path-b"]}
+        })
+      end,
+      ordered: false,
+      max_concurrency: 2,
+      timeout: 5_000
+    )
+    |> Enum.each(fn
+      {:ok, {:ok, _}} -> :ok
+      other -> flunk("unexpected dispatch result: #{inspect(other)}")
+    end)
+
+    assert_receive {:mode_transitioned, transition}
+    assert transition.from_mode == :execute
+    assert transition.to_mode == :research
+    assert length(transition.inserted_backfill_tasks) == 1
+
+    refute_receive {:mode_transitioned, %{from_mode: :execute, to_mode: :research}}, 100
+
+    assert {:ok, envelope} =
+             InboxStore.latest_by_ets_keys(["mode_backfill", transition.transition_id, "premise-c"])
+
+    assert envelope.payload.premise_id == "premise-c"
+
+    state = :sys.get_state(server)
+    assert state.mode_state_machine_mode == :research
+    assert state.mode_state_machine_context.tick == 2
   end
 end
