@@ -1,19 +1,19 @@
 defmodule Men.Gateway.Runtime.ModeStateMachine do
   @moduledoc """
-  模式切换状态机：基于每轮信号快照计算下一模式与决策元数据。
+  Mode Policy Advisor：根据快照输出模式建议。
+
+  默认只给建议，不直接强制切换主流程模式。
+  当 `apply_mode?` 为 true 时，才会把建议应用为实际迁移。
   """
 
   require Logger
 
-  @type mode :: :research | :plan | :execute
+  @type mode :: :research | :execute
+  @type recommended_mode :: :research | :execute | :hold
 
   @type context :: %{
           required(:stable_graph_ticks) => non_neg_integer(),
-          required(:cooldown_remaining) => non_neg_integer(),
           required(:tick) => non_neg_integer(),
-          required(:transition_ticks) => [non_neg_integer()],
-          required(:safety_mode) => boolean(),
-          required(:recovery_remaining) => non_neg_integer(),
           required(:last_reason) => atom() | nil
         }
 
@@ -21,25 +21,22 @@ defmodule Men.Gateway.Runtime.ModeStateMachine do
           required(:transition?) => boolean(),
           required(:from_mode) => mode(),
           required(:to_mode) => mode(),
+          required(:recommended_mode) => recommended_mode(),
+          required(:apply_mode?) => boolean(),
           required(:reason) => atom(),
           required(:priority) => atom() | nil,
           required(:tick) => non_neg_integer(),
           required(:cooldown_remaining) => non_neg_integer(),
           required(:hysteresis_state) => map(),
-          required(:warnings) => [atom()],
-          required(:safety_mode) => boolean()
+          required(:warnings) => [atom()]
         }
 
   @defaults %{
     enter_threshold: 0.75,
-    exit_threshold: 0.60,
     graph_stable_max: 0.05,
     stable_window_ticks: 3,
-    cooldown_ticks: 3,
     info_insufficient_ratio: 0.30,
-    churn_window_ticks: 8,
-    churn_max_transitions: 4,
-    research_only_recovery_ticks: 6
+    apply_mode?: false
   }
 
   @required_keys Map.keys(@defaults)
@@ -48,11 +45,7 @@ defmodule Men.Gateway.Runtime.ModeStateMachine do
   def initial_context do
     %{
       stable_graph_ticks: 0,
-      cooldown_remaining: 0,
       tick: 0,
-      transition_ticks: [],
-      safety_mode: false,
-      recovery_remaining: 0,
       last_reason: nil
     }
   end
@@ -60,111 +53,79 @@ defmodule Men.Gateway.Runtime.ModeStateMachine do
   @spec decide(mode(), map(), context(), map() | keyword()) ::
           {mode(), context(), decision_meta()}
   def decide(current_mode, snapshot, context, overrides \\ %{})
-      when current_mode in [:research, :plan, :execute] and is_map(snapshot) do
+      when current_mode in [:research, :execute] and is_map(snapshot) do
     config = resolve_config(overrides)
     tick = context.tick + 1
 
     stable_graph_ticks =
       update_stable_graph_ticks(context.stable_graph_ticks, snapshot, config.graph_stable_max)
 
-    context =
-      context
-      |> Map.put(:tick, tick)
-      |> Map.put(:stable_graph_ticks, stable_graph_ticks)
+    {recommended_mode, reason, priority} =
+      advise(current_mode, snapshot, stable_graph_ticks, config)
 
-    {current_mode, context, safety_reason} = maybe_recover_safety_mode(current_mode, context)
+    apply_mode? = truthy?(Map.get(config, :apply_mode?, false))
 
-    {target_mode, reason, priority} =
-      if context.safety_mode do
-        {:research, :research_only_safety_mode, :safety}
+    next_mode =
+      if apply_mode? and recommended_mode in [:research, :execute] and
+           recommended_mode != current_mode do
+        recommended_mode
       else
-        decide_by_mode(current_mode, snapshot, context, config)
+        current_mode
       end
-
-    {next_mode, cooldown_remaining, final_reason, final_priority} =
-      apply_cooldown_guard(current_mode, target_mode, reason, priority, context, config)
 
     transition? = next_mode != current_mode
 
-    {context, warnings} =
-      context
-      |> Map.put(:cooldown_remaining, cooldown_remaining)
-      |> Map.put(:last_reason, final_reason)
-      |> maybe_record_transition(transition?, tick, config)
-      |> maybe_enter_safety_mode(transition?, next_mode, tick, config)
-
-    reason =
-      cond do
-        transition? ->
-          final_reason
-
-        is_nil(safety_reason) ->
-          final_reason
-
-        true ->
-          safety_reason
-      end
+    next_context = %{
+      stable_graph_ticks: stable_graph_ticks,
+      tick: tick,
+      last_reason: reason
+    }
 
     meta = %{
       transition?: transition?,
       from_mode: current_mode,
       to_mode: next_mode,
+      recommended_mode: recommended_mode,
+      apply_mode?: apply_mode?,
       reason: reason,
-      priority: final_priority,
+      priority: priority,
       tick: tick,
-      cooldown_remaining: context.cooldown_remaining,
+      cooldown_remaining: 0,
       hysteresis_state: %{
         enter_threshold: config.enter_threshold,
-        exit_threshold: config.exit_threshold,
         confidence: normalize_float(Map.get(snapshot, :key_claim_confidence, 0.0)),
         stable_graph_ticks: stable_graph_ticks
       },
-      warnings: warnings,
-      safety_mode: context.safety_mode
+      warnings: []
     }
 
-    {next_mode, context, meta}
+    {next_mode, next_context, meta}
   end
 
-  defp decide_by_mode(:research, snapshot, context, config) do
+  defp advise(:research, snapshot, stable_graph_ticks, config) do
     blocking_count = normalize_non_neg_int(Map.get(snapshot, :blocking_count, 0))
     confidence = normalize_float(Map.get(snapshot, :key_claim_confidence, 0.0))
+    execute_compilable = truthy?(Map.get(snapshot, :execute_compilable))
 
     cond do
       blocking_count > 0 ->
-        {:research, :blocking_present, nil}
+        {:hold, :blocking_present, :low}
 
       confidence < config.enter_threshold ->
-        {:research, :confidence_below_enter_threshold, nil}
+        {:hold, :confidence_below_enter_threshold, :low}
 
-      context.stable_graph_ticks < config.stable_window_ticks ->
-        {:research, :graph_not_stable_yet, nil}
+      stable_graph_ticks < config.stable_window_ticks ->
+        {:hold, :graph_not_stable_yet, :low}
+
+      not execute_compilable ->
+        {:hold, :execute_not_ready, :low}
 
       true ->
-        {:plan, :confidence_and_stability_satisfied, :normal}
+        {:execute, :evidence_and_compile_ready, :normal}
     end
   end
 
-  defp decide_by_mode(:plan, snapshot, _context, config) do
-    blocking_count = normalize_non_neg_int(Map.get(snapshot, :blocking_count, 0))
-
-    cond do
-      blocking_count > 0 ->
-        {:research, :blocking_present, :low}
-
-      confidence_below_exit_threshold?(snapshot, config.exit_threshold) ->
-        {:research, :confidence_below_exit_threshold, :low}
-
-      truthy?(Map.get(snapshot, :plan_selected)) and
-          truthy?(Map.get(snapshot, :execute_compilable)) ->
-        {:execute, :plan_ready_for_execution, :normal}
-
-      true ->
-        {:plan, :plan_not_ready_for_execution, nil}
-    end
-  end
-
-  defp decide_by_mode(:execute, snapshot, _context, config) do
+  defp advise(:execute, snapshot, _stable_graph_ticks, config) do
     cond do
       truthy?(Map.get(snapshot, :premise_invalidated)) ->
         {:research, :premise_invalidated, :high}
@@ -176,88 +137,7 @@ defmodule Men.Gateway.Runtime.ModeStateMachine do
         {:research, :info_insufficient, :low}
 
       true ->
-        {:execute, :execute_stable, nil}
-    end
-  end
-
-  # 驻留期仅抑制反向回退，前提失效属于高优先级可强制突破。
-  defp apply_cooldown_guard(current_mode, target_mode, reason, priority, context, config) do
-    in_cooldown = context.cooldown_remaining > 0
-    reverse? = reverse_transition?(current_mode, target_mode)
-
-    cond do
-      current_mode != target_mode and reason == :premise_invalidated ->
-        {target_mode, config.cooldown_ticks, reason, priority}
-
-      current_mode != target_mode and in_cooldown and reverse? ->
-        {current_mode, context.cooldown_remaining - 1, :cooldown_blocked, :suppressed}
-
-      current_mode != target_mode ->
-        {target_mode, config.cooldown_ticks, reason, priority}
-
-      in_cooldown ->
-        {current_mode, context.cooldown_remaining - 1, reason, priority}
-
-      true ->
-        {current_mode, 0, reason, priority}
-    end
-  end
-
-  defp reverse_transition?(:execute, :research), do: true
-  defp reverse_transition?(:plan, :research), do: true
-  defp reverse_transition?(:execute, :plan), do: true
-  defp reverse_transition?(_, _), do: false
-
-  defp maybe_recover_safety_mode(mode, %{safety_mode: false} = context), do: {mode, context, nil}
-
-  defp maybe_recover_safety_mode(
-         _mode,
-         %{safety_mode: true, recovery_remaining: remaining} = context
-       )
-       when remaining > 1 do
-    {
-      :research,
-      %{context | recovery_remaining: remaining - 1},
-      :research_only_safety_mode
-    }
-  end
-
-  defp maybe_recover_safety_mode(_mode, %{safety_mode: true} = context) do
-    {
-      :research,
-      %{context | safety_mode: false, recovery_remaining: 0},
-      :research_only_recovered
-    }
-  end
-
-  defp maybe_record_transition(context, false, _tick, _config), do: {context, []}
-
-  defp maybe_record_transition(context, true, tick, config) do
-    min_tick = tick - config.churn_window_ticks + 1
-
-    transition_ticks =
-      [tick | context.transition_ticks]
-      |> Enum.filter(&(&1 >= min_tick))
-
-    {%{context | transition_ticks: transition_ticks}, []}
-  end
-
-  defp maybe_enter_safety_mode({context, warnings}, false, _mode, _tick, _config),
-    do: {context, warnings}
-
-  defp maybe_enter_safety_mode({context, warnings}, true, _mode, _tick, config) do
-    if length(context.transition_ticks) > config.churn_max_transitions do
-      {
-        %{
-          context
-          | safety_mode: true,
-            recovery_remaining: config.research_only_recovery_ticks,
-            last_reason: :research_only_safety_mode
-        },
-        [:churn_limit_reached | warnings]
-      }
-    else
-      {context, warnings}
+        {:hold, :execute_stable, nil}
     end
   end
 
@@ -282,13 +162,6 @@ defmodule Men.Gateway.Runtime.ModeStateMachine do
     end
   end
 
-  defp confidence_below_exit_threshold?(snapshot, exit_threshold) do
-    case Map.fetch(snapshot, :key_claim_confidence) do
-      {:ok, confidence} -> normalize_float(confidence) < exit_threshold
-      :error -> false
-    end
-  end
-
   defp resolve_config(overrides) do
     env =
       :men
@@ -302,24 +175,12 @@ defmodule Men.Gateway.Runtime.ModeStateMachine do
       |> Map.merge(env)
       |> Map.merge(override_map)
 
-    should_warn_env? = map_size(env) > 0
-
     Enum.reduce(@required_keys, merged, fn key, acc ->
-      configured_in_env? = Map.has_key?(env, key)
-      configured_in_override? = Map.has_key?(override_map, key)
-      nil_override? = Map.has_key?(override_map, key) and is_nil(Map.get(override_map, key))
-
-      cond do
-        nil_override? ->
-          warn_missing_config(key, Map.get(@defaults, key))
-          Map.put(acc, key, Map.get(@defaults, key))
-
-        should_warn_env? and not configured_in_env? and not configured_in_override? ->
-          warn_missing_config(key, Map.get(@defaults, key))
-          Map.put(acc, key, Map.get(@defaults, key))
-
-        true ->
-          acc
+      if Map.has_key?(acc, key) and not is_nil(Map.get(acc, key)) do
+        acc
+      else
+        warn_missing_config(key, Map.get(@defaults, key))
+        Map.put(acc, key, Map.get(@defaults, key))
       end
     end)
   end
@@ -331,7 +192,7 @@ defmodule Men.Gateway.Runtime.ModeStateMachine do
       :ok
     else
       Logger.warning(
-        "mode_state_machine config missing key=#{key}, fallback_default=#{inspect(fallback)}"
+        "mode_policy_advisor config missing key=#{key}, fallback_default=#{inspect(fallback)}"
       )
 
       Process.put({__MODULE__, :missing_config_warned}, MapSet.put(warned, key))

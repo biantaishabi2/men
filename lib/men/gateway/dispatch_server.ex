@@ -33,6 +33,7 @@ defmodule Men.Gateway.DispatchServer do
           rebuild_target: GenServer.server() | nil,
           rebuild_notify_pid: pid() | nil,
           mode_state_machine_enabled: boolean(),
+          mode_policy_apply: boolean(),
           mode_state_machine: module(),
           mode_state_machine_mode: ModeStateMachine.mode(),
           mode_state_machine_context: ModeStateMachine.context(),
@@ -146,6 +147,8 @@ defmodule Men.Gateway.DispatchServer do
           :mode_state_machine_enabled,
           Keyword.get(config, :mode_state_machine_enabled, true)
         ),
+      mode_policy_apply:
+        Keyword.get(opts, :mode_policy_apply, Keyword.get(config, :mode_policy_apply, false)),
       mode_state_machine:
         Keyword.get(
           opts,
@@ -413,6 +416,7 @@ defmodule Men.Gateway.DispatchServer do
       |> Map.put_new(:churn_window_ticks, state.mode_transition_suppression_window_ticks)
       |> Map.put_new(:churn_max_transitions, state.mode_transition_suppression_limit)
       |> Map.put_new(:research_only_recovery_ticks, state.mode_transition_recovery_ticks)
+      |> Map.put_new(:apply_mode?, state.mode_policy_apply)
 
     {next_mode, next_context, decision_meta} =
       state.mode_state_machine.decide(
@@ -428,11 +432,38 @@ defmodule Men.Gateway.DispatchServer do
         mode_state_machine_context: next_context
     }
 
-    if decision_meta.transition? do
-      finalize_mode_transition(base_state, snapshot, decision_meta)
-    else
-      base_state
+    cond do
+      decision_meta.transition? ->
+        finalize_mode_transition(base_state, snapshot, decision_meta)
+
+      decision_meta.recommended_mode in [:research, :execute] ->
+        finalize_mode_advice(base_state, snapshot, decision_meta)
+
+      true ->
+        base_state
     end
+  end
+
+  defp finalize_mode_advice(state, snapshot, decision_meta) do
+    advice_event = %{
+      recommendation_id: new_transition_id(),
+      from_mode: decision_meta.from_mode,
+      recommended_mode: decision_meta.recommended_mode,
+      reason: decision_meta.reason,
+      priority: decision_meta.priority,
+      tick: decision_meta.tick,
+      snapshot_digest: snapshot_digest(snapshot),
+      hysteresis_state: decision_meta.hysteresis_state,
+      apply_mode?: decision_meta.apply_mode?
+    }
+
+    publish_mode_transition(state.mode_transition_topic, advice_event)
+
+    if is_pid(state.rebuild_notify_pid) do
+      send(state.rebuild_notify_pid, {:mode_advised, advice_event})
+    end
+
+    state
   end
 
   defp finalize_mode_transition(state, snapshot, decision_meta) do
@@ -441,7 +472,8 @@ defmodule Men.Gateway.DispatchServer do
 
     inserted_backfill_tasks = dedup_backfill_tasks(backfill_tasks)
 
-    queued_backfill_tasks = enqueue_backfill_tasks(inserted_backfill_tasks, state.inbox_store_opts)
+    queued_backfill_tasks =
+      enqueue_backfill_tasks(inserted_backfill_tasks, state.inbox_store_opts)
 
     transition_event = %{
       transition_id: transition_id,
