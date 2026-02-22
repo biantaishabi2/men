@@ -91,6 +91,42 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapterTest do
     assert String.contains?(content, "done")
   end
 
+  test "发送 delta EventMessage 时结构化 text 不会崩溃" do
+    message = %EventMessage{
+      event_type: :delta,
+      payload: %{text: {:chunk, 1}},
+      metadata: %{request_id: "req-delta-struct", run_id: "run-delta-struct", session_key: "dingtalk:u1"}
+    }
+
+    assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", message)
+    assert_receive {:transport_post, _url, _headers, body}
+
+    decoded = Jason.decode!(body)
+    content = decoded["text"]["content"]
+
+    assert String.contains?(content, "{:chunk, 1}")
+    assert String.contains?(content, "run_id=run-delta-struct")
+    assert String.contains?(content, "session_key=dingtalk:u1")
+  end
+
+  test "发送 final EventMessage 时结构化 text 不会崩溃" do
+    message = %EventMessage{
+      event_type: :final,
+      payload: %{text: %{done: true}},
+      metadata: %{request_id: "req-final-struct", run_id: "run-final-struct", session_key: "dingtalk:u1"}
+    }
+
+    assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", message)
+    assert_receive {:transport_post, _url, _headers, body}
+
+    decoded = Jason.decode!(body)
+    content = decoded["text"]["content"]
+
+    assert String.contains?(content, "%{done: true}")
+    assert String.contains?(content, "run_id=run-final-struct")
+    assert String.contains?(content, "session_key=dingtalk:u1")
+  end
+
   test "发送 error EventMessage 成功并标准化错误文本" do
     message = %EventMessage{
       event_type: :error,

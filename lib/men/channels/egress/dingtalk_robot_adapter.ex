@@ -188,13 +188,26 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
   defp payload_text(payload) when is_binary(payload), do: payload
 
   defp payload_text(payload) when is_map(payload) do
+    payload
+    |> payload_candidate_text()
+    |> stringify_payload_text()
+  end
+
+  defp payload_text(payload), do: stringify_payload_text(payload)
+
+  defp payload_candidate_text(payload) do
     payload_value(payload, :text) ||
       payload_value(payload, :content) ||
       payload_value(payload, :message) ||
-      inspect(payload)
+      payload
   end
 
-  defp payload_text(payload), do: inspect(payload)
+  # delta/final 文本可能来自结构化字段，统一安全转字符串，避免 String.Chars 协议崩溃。
+  defp stringify_payload_text(value) when is_binary(value), do: value
+  defp stringify_payload_text(value) when is_atom(value), do: Atom.to_string(value)
+  defp stringify_payload_text(value) when is_integer(value), do: Integer.to_string(value)
+  defp stringify_payload_text(value) when is_float(value), do: :erlang.float_to_binary(value, [:compact])
+  defp stringify_payload_text(value), do: inspect(value)
 
   defp payload_value(payload, key) when is_map(payload) do
     Map.get(payload, key) || Map.get(payload, Atom.to_string(key))
