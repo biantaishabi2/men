@@ -209,7 +209,7 @@ defmodule Men.RuntimeBridge.Bridge do
 
   defp normalize_start_turn_result({:error, error_payload}, _request)
        when is_map(error_payload) do
-    details = error_payload |> Map.get(:details, %{}) |> ensure_map()
+    details = error_payload |> map_get_any([:details, "details"]) |> ensure_map()
     raw_code = Map.get(error_payload, :code, Map.get(error_payload, "code", :runtime_error))
     raw_type = Map.get(error_payload, :type, Map.get(error_payload, "type"))
 
@@ -451,10 +451,10 @@ defmodule Men.RuntimeBridge.Bridge do
   end
 
   defp map_get_any(map, keys) when is_map(map) do
-    Enum.find_value(keys, fn key ->
+    Enum.reduce_while(keys, nil, fn key, _acc ->
       case Map.fetch(map, key) do
-        {:ok, value} -> value
-        :error -> nil
+        {:ok, value} -> {:halt, value}
+        :error -> {:cont, nil}
       end
     end)
   end
@@ -464,8 +464,16 @@ defmodule Men.RuntimeBridge.Bridge do
   defp ensure_map(value) when is_map(value), do: value
   defp ensure_map(_value), do: %{}
 
+  defp normalize_message(nil), do: ""
   defp normalize_message(value) when is_binary(value), do: String.downcase(value)
-  defp normalize_message(value), do: value |> to_string() |> String.downcase()
+
+  defp normalize_message(value) when is_atom(value),
+    do: value |> Atom.to_string() |> String.downcase()
+
+  defp normalize_message(value) when is_number(value),
+    do: value |> to_string() |> String.downcase()
+
+  defp normalize_message(value), do: value |> inspect() |> String.downcase()
 
   defp retryable?(code) do
     normalize_code(code) in [:timeout, :session_not_found, :transport_error]

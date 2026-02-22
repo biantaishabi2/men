@@ -40,6 +40,39 @@ defmodule Men.RuntimeBridge.ZcpgRPCTest do
     end
   end
 
+  defmodule MockLegacyErrorBridge do
+    @behaviour Men.RuntimeBridge.Bridge
+
+    @impl true
+    def start_turn(prompt, _context) do
+      case prompt do
+        "keep-retryable-false" ->
+          {:error,
+           %{
+             code: "runtime_error",
+             message: "upstream failed",
+             details: %{status: 502, retryable: false}
+           }}
+
+        "string-details" ->
+          {:error,
+           %{
+             "code" => "runtime_error",
+             "message" => "unprocessable",
+             "details" => %{"status" => 422}
+           }}
+
+        "map-message" ->
+          {:error,
+           %{
+             code: "runtime_error",
+             message: %{"reason" => "bad payload"},
+             details: %{status: 500}
+           }}
+      end
+    end
+  end
+
   defmodule DeterministicTransport do
     @behaviour Men.RuntimeBridge.ZcpgRPC.HttpTransport
 
@@ -277,6 +310,31 @@ defmodule Men.RuntimeBridge.ZcpgRPCTest do
     # 确认同语义在 v1 原子接口下仍是 timeout。
     assert {:error, %Error{code: :timeout, retryable: true}} =
              Bridge.prompt(request, adapter: ZcpgRPC, transport: DeterministicTransport)
+  end
+
+  test "details.retryable=false 保真: 不被兜底推断覆盖" do
+    request = build_prompt_request("keep-retryable-false")
+
+    assert {:error, %Error{} = error} = Bridge.prompt(request, adapter: MockLegacyErrorBridge)
+    assert error.code == :runtime_error
+    assert error.retryable == false
+  end
+
+  test "legacy 错误 message 为 map 时归一化不抛异常" do
+    request = build_prompt_request("map-message")
+
+    assert {:error, %Error{} = error} = Bridge.prompt(request, adapter: MockLegacyErrorBridge)
+    assert error.code == :runtime_error
+    assert is_map(error.message)
+    assert error.retryable == true
+  end
+
+  test "legacy 错误读取 string-key details 参与优先级归一化" do
+    request = build_prompt_request("string-details")
+
+    assert {:error, %Error{} = error} = Bridge.prompt(request, adapter: MockLegacyErrorBridge)
+    assert error.code == :invalid_argument
+    assert error.retryable == false
   end
 
   defp build_prompt_request(prompt) do
