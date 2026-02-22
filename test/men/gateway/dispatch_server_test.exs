@@ -252,7 +252,7 @@ defmodule Men.Gateway.DispatchServerTest do
     assert runtime_session_id_1 == runtime_session_id_2
   end
 
-  test "session_not_found 仅重建一次并重试一次成功" do
+  test "session_not_found 当前语义：不重建重试，直接 error 回写" do
     coordinator_name = start_session_coordinator()
 
     server =
@@ -269,16 +269,16 @@ defmodule Men.Gateway.DispatchServerTest do
       user_id: "u-heal"
     }
 
-    assert {:ok, result} = DispatchServer.dispatch(server, event)
-    assert result.run_id == "run-heal-1"
+    assert {:error, error_result} = DispatchServer.dispatch(server, event)
+    assert error_result.run_id == "run-heal-1"
+    assert error_result.code == "session_not_found"
 
-    assert_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1", session_key: runtime_session_id_1}}
-    assert_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1", session_key: runtime_session_id_2}}
-    assert runtime_session_id_1 != runtime_session_id_2
+    assert_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1"}}
+    refute_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1"}}
 
-    assert_receive {:egress_called, "feishu:u-heal", %FinalMessage{}}
+    assert_receive {:egress_called, "feishu:u-heal", %ErrorMessage{} = message}
+    assert message.code == "session_not_found"
     refute_receive {:egress_called, "feishu:u-heal", %FinalMessage{}}
-    refute_receive {:egress_called, "feishu:u-heal", %ErrorMessage{}}
   end
 
   test "runtime_session_not_found 不重试" do
@@ -307,8 +307,8 @@ defmodule Men.Gateway.DispatchServerTest do
     assert message.code == "runtime_session_not_found"
   end
 
-  test "run 终态缓存超过上限后淘汰最旧 run_id" do
-    server = start_dispatch_server(run_terminal_limit: 2)
+  test "当前语义下 duplicate 命中不会重新执行 runtime" do
+    server = start_dispatch_server()
 
     event_1 = %{
       request_id: "req-cache-1",
@@ -341,14 +341,14 @@ defmodule Men.Gateway.DispatchServerTest do
     assert {:ok, _} = DispatchServer.dispatch(server, event_3)
     assert_receive {:bridge_called, "cache-3", %{run_id: "run-cache-3"}}
 
-    assert {:ok, _} = DispatchServer.dispatch(server, event_2)
+    assert {:ok, :duplicate} = DispatchServer.dispatch(server, event_2)
     refute_receive {:bridge_called, "cache-2", %{run_id: "run-cache-2"}}
 
-    assert {:ok, _} = DispatchServer.dispatch(server, event_1)
-    assert_receive {:bridge_called, "cache-1", %{run_id: "run-cache-1"}}
+    assert {:ok, :duplicate} = DispatchServer.dispatch(server, event_1)
+    refute_receive {:bridge_called, "cache-1", %{run_id: "run-cache-1"}}
   end
 
-  test "run_id 幂等命中终态缓存且不重复出站" do
+  test "run_id 幂等命中 duplicate 且不重复出站" do
     server = start_dispatch_server()
 
     event = %{
@@ -363,11 +363,11 @@ defmodule Men.Gateway.DispatchServerTest do
     assert_receive {:bridge_called, "hello", %{run_id: "fixed-run-id"}}
     assert_receive {:egress_called, "feishu:u300", %FinalMessage{}}
 
-    assert {:ok, second_result} = DispatchServer.dispatch(server, event)
-    assert second_result == first_result
+    assert {:ok, :duplicate} = DispatchServer.dispatch(server, event)
     refute_receive {:bridge_called, "hello", %{run_id: "fixed-run-id"}}
     refute_receive {:egress_called, "feishu:u300", %FinalMessage{}}
     refute_receive {:egress_called, "feishu:u300", %ErrorMessage{}}
+    _ = first_result
   end
 
   test "egress 失败返回 EGRESS_ERROR 时不缓存终态，可同 run_id 恢复重试" do
@@ -393,12 +393,12 @@ defmodule Men.Gateway.DispatchServerTest do
     assert result.run_id == "retryable-run-id"
     assert_receive {:bridge_called, "hello", %{run_id: "retryable-run-id"}}
 
-    assert {:ok, result_cached} = DispatchServer.dispatch(server, event)
-    assert result_cached == result
+    assert {:ok, :duplicate} = DispatchServer.dispatch(server, event)
     refute_receive {:bridge_called, "hello", %{run_id: "retryable-run-id"}}
+    _ = result
   end
 
-  test "同 run_id 并发提交: 只执行一次 runtime 与一次 egress" do
+  test "同 run_id 并发提交: 返回值为 {:ok, result} 与 {:ok, :duplicate}" do
     server = start_dispatch_server()
 
     event = %{
@@ -415,7 +415,8 @@ defmodule Men.Gateway.DispatchServerTest do
       end
 
     results = Enum.map(tasks, &Task.await(&1, 2_000))
-    assert Enum.uniq(results) |> length() == 1
+    assert Enum.any?(results, &match?({:ok, %{run_id: "concurrent-run-id"}}, &1))
+    assert Enum.any?(results, &match?({:ok, :duplicate}, &1))
 
     assert_receive {:bridge_called, "hello", %{run_id: "concurrent-run-id"}}
     refute_receive {:bridge_called, "hello", %{run_id: "concurrent-run-id"}}

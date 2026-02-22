@@ -159,18 +159,17 @@ defmodule Men.Integration.DingtalkWebhookFlowTest do
     _ = conn
   end
 
-  test "session_not_found 在 webhook 主链路单次自愈且不重复出站", %{conn: conn} do
+  test "session_not_found 在 webhook 主链路当前语义为 error 回写", %{conn: conn} do
     event_payload = payload("evt-integration-5", "user-heal", "conv-heal", "session_not_found_once")
 
     assert accepted?(post_signed(conn, event_payload))
 
-    assert_receive {:bridge_called, prompt, %{run_id: run_id, session_key: runtime_session_id_1}}
-    assert_receive {:bridge_called, ^prompt, %{run_id: ^run_id, session_key: runtime_session_id_2}}
-    assert runtime_session_id_1 != runtime_session_id_2
+    assert_receive {:bridge_called, _, %{run_id: _run_id, session_key: _runtime_session_id}}
+    refute_receive {:bridge_called, _, %{run_id: _}}
 
-    assert_receive {:egress_called, "dingtalk:user-heal", %Men.Channels.Egress.Messages.FinalMessage{}}
+    assert_receive {:egress_called, "dingtalk:user-heal", %Men.Channels.Egress.Messages.ErrorMessage{} = message}
+    assert message.code == "session_not_found"
     refute_receive {:egress_called, "dingtalk:user-heal", %Men.Channels.Egress.Messages.FinalMessage{}}
-    refute_receive {:egress_called, "dingtalk:user-heal", %Men.Channels.Egress.Messages.ErrorMessage{}}
   end
 
   test "bridge 失败不影响 webhook 立即 ACK，后台按既有语义 error 回写", %{conn: conn} do
