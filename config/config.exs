@@ -14,7 +14,8 @@ config :men,
 config :men, Men.Gateway.DispatchServer,
   bridge_adapter: Men.RuntimeBridge.GongCLI,
   egress_adapter: Men.Channels.Egress.RouterAdapter,
-  storage_adapter: :memory
+  storage_adapter: :memory,
+  chat_streaming_enabled: true
 
 config :men, Men.Channels.Ingress.FeishuAdapter,
   sign_mode: :strict,
