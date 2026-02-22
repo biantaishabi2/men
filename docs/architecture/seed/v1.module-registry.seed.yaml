@@ -4,6 +4,7 @@ generated_at: 2026-02-20
 sources:
   - docs/architecture/openclaw-analysis-sources.md
   - docs/architecture/v1-architecture-plan.md
+  - docs/architecture/solum-runtime-notes.md
 
 modules:
   - module_id: gateway_control_plane
@@ -16,6 +17,43 @@ modules:
         - lib/men/gateway/**
         - lib/men/routing/**
         - lib/men/session_registry/**
+
+  # gateway_control_plane 子模块：控制/数据分离落地
+  - module_id: repl_state_plane
+    display_name: REPL State Plane（ETS 状态基座 + Frame 快照）
+    domain_kind: business
+    layer: application
+    precedence: 11
+    parent: gateway_control_plane
+    path_rules:
+      include:
+        - lib/men/gateway/repl_store.ex
+        - lib/men/gateway/frame_builder.ex
+        - lib/men/gateway/stream_session_store.ex
+
+  - module_id: repl_acl
+    display_name: REPL ACL（命名空间访问控制）
+    domain_kind: business
+    layer: application
+    precedence: 12
+    parent: gateway_control_plane
+    path_rules:
+      include:
+        - lib/men/gateway/repl_acl.ex
+        - lib/men/gateway/acl/**
+
+  - module_id: event_signal_plane
+    display_name: Event Signal Plane（PubSub 事件层 + 唤醒策略）
+    domain_kind: business
+    layer: application
+    precedence: 13
+    parent: gateway_control_plane
+    path_rules:
+      include:
+        - lib/men/gateway/event_bus.ex
+        - lib/men/gateway/event_envelope.ex
+        - lib/men/gateway/wake_policy.ex
+        - lib/men/gateway/inbox_store.ex
 
   - module_id: channel_ingress
     display_name: Channel Ingress

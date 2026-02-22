@@ -4,6 +4,7 @@
 
 1. `gateway_control_plane`
 - owns protocol, routing, session lookup, dispatch decisions
+- owns control-state transitions and frame-driven dispatch loop
 
 2. `channel_ingress`
 - owns webhook/http/ws inbound adapters (Feishu first)
@@ -33,6 +34,9 @@
 - `routing`
 - `session_registry`
 - `dispatch`
+- `repl_state_plane` (ETS state base + frame snapshot build)
+- `repl_acl` (namespace access control: main/global vs child/local)
+- `event_signal_plane` (PubSub event envelope + wake policy)
 
 2. `channel_ingress`
 - `feishu`
@@ -57,6 +61,23 @@
 - `telemetry`
 - `security`
 - `idempotency`
+
+## Control/Data Separation Contract (V1.1 addendum)
+
+1. Control flow owner:
+- `gateway_control_plane` (`DispatchServer`-driven loop) is the only module that mutates control state.
+
+2. Data flow owner:
+- `repl_state_plane` is the only module that mutates shared runtime data (ETS-backed).
+
+3. ACL boundary:
+- all state read/write operations must pass `repl_acl` checks.
+- child agents can only write `agent.<id>.*`; only main control can write `global.control.*`.
+
+4. Event boundary:
+- realtime notifications travel through `event_signal_plane` (PubSub).
+- events are lightweight; detailed payload stays in `repl_state_plane`.
+- wake decision is policy-driven (`wake=true` vs `inbox_only`).
 
 ## Adapter Contracts (must keep stable)
 

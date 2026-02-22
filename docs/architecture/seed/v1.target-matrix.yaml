@@ -16,6 +16,12 @@ allow_edges:
   - caller: gateway_control_plane
     callee: foundation_infra
     rationale: gateway uses shared infra and contracts
+  - caller: gateway_control_plane
+    callee: repl_state_plane
+    rationale: control plane reads/writes shared state and builds frames
+  - caller: gateway_control_plane
+    callee: event_signal_plane
+    rationale: control plane consumes/publishes events and applies wake policy
 
   - caller: channel_ingress
     callee: gateway_control_plane
@@ -55,6 +61,20 @@ allow_edges:
     callee: foundation_infra
     rationale: node_connector 使用 config 获取节点名/cookie
 
+  - caller: repl_state_plane
+    callee: repl_acl
+    rationale: all state operations must pass namespace ACL checks
+  - caller: repl_state_plane
+    callee: foundation_infra
+    rationale: state plane uses telemetry and persistence contracts
+
+  - caller: event_signal_plane
+    callee: foundation_infra
+    rationale: event plane uses PubSub and telemetry contracts
+  - caller: event_signal_plane
+    callee: repl_state_plane
+    rationale: inbox/event metadata stored in state plane for replayable frame rebuild
+
   - caller: plugin_tool_extension
     callee: gateway_control_plane
     rationale: plugin actions bind gateway session context
@@ -85,6 +105,9 @@ forbid_edges:
   - caller: foundation_infra
     callee: plugin_tool_extension
     rationale: infra must not depend on plugin implementations
+  - caller: repl_acl
+    callee: gateway_control_plane
+    rationale: ACL layer must not import control-plane internals
 
   - caller: external_dependencies
     callee: gateway_control_plane

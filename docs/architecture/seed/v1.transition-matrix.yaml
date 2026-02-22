@@ -25,6 +25,18 @@ temporary_allow_edges:
     due: 2026-03-15
     reason: temporary direct callback sender before egress extraction
 
+  - caller: gateway_control_plane
+    callee: repl_acl
+    owner: gateway-team
+    due: 2026-03-25
+    reason: temporary direct ACL checks before all calls are routed through repl_state_plane
+
+  - caller: channel_ingress
+    callee: event_signal_plane
+    owner: gateway-team
+    due: 2026-03-25
+    reason: temporary direct inbound event publish while dispatch enqueue path is being unified
+
 blocked_edges:
   - caller: foundation_infra
     callee: gateway_control_plane
@@ -37,3 +49,15 @@ blocked_edges:
     owner: integration-team
     priority: P0
     reason: wrong dependency direction
+
+  - caller: channel_ingress
+    callee: repl_state_plane
+    owner: gateway-team
+    priority: P0
+    reason: ingress must not bypass control plane to mutate shared state
+
+  - caller: channel_egress
+    callee: repl_state_plane
+    owner: gateway-team
+    priority: P0
+    reason: egress must be output adapter only, no direct state-plane mutation
