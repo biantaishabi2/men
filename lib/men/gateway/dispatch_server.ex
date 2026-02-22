@@ -511,11 +511,19 @@ defmodule Men.Gateway.DispatchServer do
 
     %{
       type: Map.get(payload, :type, :failed),
-      code: Map.get(payload, :code, "DISPATCH_ERROR") |> to_string(),
-      message: Map.get(payload, :message, "dispatch failed") |> to_string(),
+      code: stringify_error_field(Map.get(payload, :code), "DISPATCH_ERROR"),
+      message: stringify_error_field(Map.get(payload, :message), "dispatch failed"),
       details: Map.get(payload, :details)
     }
   end
+
+  # 错误字段允许结构化输入，统一降级为可读字符串，避免 String.Chars 崩溃。
+  defp stringify_error_field(nil, default), do: default
+  defp stringify_error_field(value, _default) when is_binary(value), do: value
+  defp stringify_error_field(value, _default) when is_atom(value), do: Atom.to_string(value)
+  defp stringify_error_field(value, _default) when is_integer(value), do: Integer.to_string(value)
+  defp stringify_error_field(value, _default) when is_float(value), do: :erlang.float_to_binary(value, [:compact])
+  defp stringify_error_field(value, _default), do: inspect(value)
 
   defp run_terminal?(state, run_id) do
     state

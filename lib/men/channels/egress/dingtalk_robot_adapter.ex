@@ -38,28 +38,28 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
   end
 
   @impl true
-  def send(_target, %EventMessage{} = message) do
-    send_text(build_event_text(message))
+  def send(target, %EventMessage{} = message) do
+    send_text(target, build_event_text(message))
   end
 
-  def send(_target, %FinalMessage{} = message) do
+  def send(target, %FinalMessage{} = message) do
     message
     |> final_to_event_message()
     |> build_event_text()
-    |> send_text()
+    |> then(&send_text(target, &1))
   end
 
-  def send(_target, %ErrorMessage{} = message) do
+  def send(target, %ErrorMessage{} = message) do
     message
     |> error_to_event_message()
     |> build_event_text()
-    |> send_text()
+    |> then(&send_text(target, &1))
   end
 
   def send(_target, _message), do: {:error, :unsupported_message}
 
-  defp send_text(content) do
-    with {:ok, cfg} <- load_config(),
+  defp send_text(target, content) do
+    with {:ok, cfg} <- load_config(target),
          {:ok, url} <- build_url(cfg),
          {:ok, body} <- Jason.encode(%{"msgtype" => "text", "text" => %{"content" => content}}),
          :ok <- do_post(cfg, url, body) do
@@ -85,23 +85,28 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
     end
   end
 
-  defp load_config do
+  defp load_config(target) do
     app_cfg = Application.get_env(:men, __MODULE__, [])
+    target_cfg = normalize_target_config(target)
 
     webhook_url =
-      Keyword.get(app_cfg, :webhook_url) ||
+      target_cfg.webhook_url ||
+        Keyword.get(app_cfg, :webhook_url) ||
         System.get_env("DINGTALK_ROBOT_WEBHOOK_URL")
 
     if is_binary(webhook_url) and webhook_url != "" do
       {:ok,
        %{
          webhook_url: webhook_url,
-         secret: Keyword.get(app_cfg, :secret) || System.get_env("DINGTALK_ROBOT_SECRET"),
+         secret:
+           target_cfg.secret ||
+             Keyword.get(app_cfg, :secret) ||
+             System.get_env("DINGTALK_ROBOT_SECRET"),
          sign_enabled:
-           Keyword.get(app_cfg, :sign_enabled, false) or
+           target_cfg.sign_enabled || Keyword.get(app_cfg, :sign_enabled, false) or
              System.get_env("DINGTALK_ROBOT_SIGN_ENABLED") in ~w(true TRUE 1),
-         transport: Keyword.get(app_cfg, :transport, HttpTransport),
-         request_opts: Keyword.get(app_cfg, :request_opts, [])
+         transport: target_cfg.transport || Keyword.get(app_cfg, :transport, HttpTransport),
+         request_opts: target_cfg.request_opts || Keyword.get(app_cfg, :request_opts, [])
        }}
     else
       {:error, :missing_webhook_url}
@@ -208,4 +213,22 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
   defp normalize_error_code(code), do: to_string(code)
 
   defp metadata_value(metadata, key, default), do: Messages.metadata_value(metadata, key, default)
+
+  defp normalize_target_config(target) when is_map(target) do
+    %{
+      webhook_url: map_value(target, :webhook_url),
+      secret: map_value(target, :secret),
+      sign_enabled: map_value(target, :sign_enabled) == true,
+      transport: map_value(target, :transport),
+      request_opts: map_value(target, :request_opts)
+    }
+  end
+
+  defp normalize_target_config(_target) do
+    %{webhook_url: nil, secret: nil, sign_enabled: false, transport: nil, request_opts: nil}
+  end
+
+  defp map_value(map, key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
 end

@@ -30,6 +30,15 @@ defmodule Men.Gateway.DispatchServerTest do
              details: %{source: :mock}
            }}
 
+        prompt == "bridge_error_non_string_fields" ->
+          {:error,
+           %{
+             type: :failed,
+             code: {:upstream, :timeout},
+             message: %{reason: "timeout"},
+             details: %{source: :mock}
+           }}
+
         prompt == "stream_ab" ->
           {:ok,
            %{
@@ -290,6 +299,28 @@ defmodule Men.Gateway.DispatchServerTest do
 
     assert_receive {:egress_called, "feishu:u201", %EventMessage{event_type: :error} = message}
     assert message.payload.code == "BRIDGE_FAIL"
+  end
+
+  test "error 事件标准化: code/message 为结构化数据时不崩溃" do
+    server = start_dispatch_server()
+
+    event = %{
+      request_id: "req-2c",
+      payload: "bridge_error_non_string_fields",
+      channel: "feishu",
+      user_id: "u202"
+    }
+
+    assert {:error, error_result} = DispatchServer.dispatch(server, event)
+    assert error_result.session_key == "feishu:u202"
+    assert is_binary(error_result.code)
+    assert String.contains?(error_result.code, "upstream")
+    assert is_binary(error_result.reason)
+    assert String.contains?(error_result.reason, "timeout")
+
+    assert_receive {:egress_called, "feishu:u202", %EventMessage{event_type: :error} = message}
+    assert is_binary(message.payload.code)
+    assert is_binary(message.payload.reason)
   end
 
   test "重复 run_id: 返回 duplicate 且不重复 egress" do

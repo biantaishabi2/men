@@ -164,4 +164,17 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapterTest do
 
     assert {:error, :missing_webhook_url} = DingtalkRobotAdapter.send("dingtalk:u1", message)
   end
+
+  test "target map 中 webhook_url 可覆盖全局配置" do
+    message = %EventMessage{event_type: :final, payload: %{text: "hello"}, metadata: %{}}
+
+    target = %{
+      session_key: "dingtalk:u1",
+      webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=target-token"
+    }
+
+    assert :ok = DingtalkRobotAdapter.send(target, message)
+    assert_receive {:transport_post, url, _headers, _body}
+    assert String.contains?(url, "access_token=target-token")
+  end
 end

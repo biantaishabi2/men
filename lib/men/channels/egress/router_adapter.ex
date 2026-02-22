@@ -22,35 +22,34 @@ defmodule Men.Channels.Egress.RouterAdapter do
   defp resolve_target(target, _message) when is_binary(target) and target != "", do: target
 
   defp resolve_target(target, %EventMessage{metadata: metadata}) when is_map(target) do
-    session_key =
-      Map.get(target, :session_key) ||
-        Map.get(target, "session_key") ||
-        Map.get(target, :target) ||
-        Map.get(target, "target")
-
-    session_key || Messages.metadata_value(metadata, :session_key, nil)
+    ensure_map_session_key(target, metadata)
   end
 
   defp resolve_target(target, %{metadata: metadata}) when is_map(target) do
-    session_key =
-      Map.get(target, :session_key) ||
-        Map.get(target, "session_key") ||
-        Map.get(target, :target) ||
-        Map.get(target, "target")
-
-    session_key || Messages.metadata_value(metadata, :session_key, nil)
+    ensure_map_session_key(target, metadata)
   end
 
   defp resolve_target(target, %{metadata: metadata}), do: target || Messages.metadata_value(metadata, :session_key, nil)
 
   defp resolve_target(target, _message), do: target
 
+  # map target 需保持透传，仅在缺少 session_key 时补齐路由键。
+  defp ensure_map_session_key(target, metadata) do
+    if map_target_session_key(target) do
+      target
+    else
+      case Messages.metadata_value(metadata, :session_key, nil) do
+        session_key when is_binary(session_key) and session_key != "" ->
+          Map.put(target, :session_key, session_key)
+
+        _ ->
+          target
+      end
+    end
+  end
+
   defp resolve_adapter(%{} = target) do
-    session_key =
-      Map.get(target, :session_key) ||
-        Map.get(target, "session_key") ||
-        Map.get(target, :target) ||
-        Map.get(target, "target")
+    session_key = map_target_session_key(target)
 
     resolve_adapter(session_key)
   end
@@ -64,4 +63,11 @@ defmodule Men.Channels.Egress.RouterAdapter do
   end
 
   defp resolve_adapter(_), do: {:error, :unsupported_channel}
+
+  defp map_target_session_key(target) do
+    Map.get(target, :session_key) ||
+      Map.get(target, "session_key") ||
+      Map.get(target, :target) ||
+      Map.get(target, "target")
+  end
 end
