@@ -8,8 +8,11 @@ defmodule Men.Gateway.DispatchServer do
   require Logger
 
   alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
+  alias Men.Gateway.EventEnvelope
+  alias Men.Gateway.InboxStore
   alias Men.Gateway.SessionCoordinator
   alias Men.Gateway.Types
+  alias Men.Gateway.WakePolicy
   alias Men.Routing.SessionKey
 
   @type terminal_reply :: {:ok, Types.dispatch_result()} | {:error, Types.error_result()}
@@ -21,6 +24,13 @@ defmodule Men.Gateway.DispatchServer do
           session_coordinator_enabled: boolean(),
           session_coordinator_name: GenServer.server(),
           session_rebuild_retry_enabled: boolean(),
+          event_coordination_enabled: boolean(),
+          wake_enabled: boolean(),
+          wake_policy_overrides: map(),
+          wake_policy_strict_inbox_priority: boolean(),
+          inbox_store_opts: keyword(),
+          rebuild_target: GenServer.server() | nil,
+          rebuild_notify_pid: pid() | nil,
           run_terminal_limit: pos_integer(),
           run_terminal_order: :queue.queue(binary()),
           session_last_context: %{optional(binary()) => Types.run_context()},
@@ -50,6 +60,18 @@ defmodule Men.Gateway.DispatchServer do
     GenServer.call(server, {:dispatch, inbound_event})
   end
 
+  @spec coordinate_event(GenServer.server(), map() | EventEnvelope.t(), keyword() | map()) ::
+          {:ok,
+           %{
+             envelope: EventEnvelope.t(),
+             store_result: :ok | :duplicate | :stale,
+             rebuild_triggered: boolean()
+           }}
+          | {:error, term()}
+  def coordinate_event(server \\ __MODULE__, event, runtime_overrides \\ %{}) do
+    GenServer.call(server, {:coordinate_event, event, runtime_overrides})
+  end
+
   @spec enqueue(GenServer.server(), Types.inbound_event()) ::
           :ok | {:error, :dispatch_server_unavailable}
   def enqueue(server \\ __MODULE__, inbound_event) do
@@ -74,11 +96,40 @@ defmodule Men.Gateway.DispatchServer do
       storage_adapter:
         Keyword.get(opts, :storage_adapter, Keyword.get(config, :storage_adapter, :memory)),
       session_coordinator_enabled:
-        Keyword.get(opts, :session_coordinator_enabled, Keyword.get(coordinator_config, :enabled, true)),
-      session_coordinator_name:
-        Keyword.get(opts, :session_coordinator_name, SessionCoordinator),
+        Keyword.get(
+          opts,
+          :session_coordinator_enabled,
+          Keyword.get(coordinator_config, :enabled, true)
+        ),
+      session_coordinator_name: Keyword.get(opts, :session_coordinator_name, SessionCoordinator),
       session_rebuild_retry_enabled:
-        Keyword.get(opts, :session_rebuild_retry_enabled, Keyword.get(config, :session_rebuild_retry_enabled, true)),
+        Keyword.get(
+          opts,
+          :session_rebuild_retry_enabled,
+          Keyword.get(config, :session_rebuild_retry_enabled, true)
+        ),
+      event_coordination_enabled:
+        Keyword.get(
+          opts,
+          :event_coordination_enabled,
+          Keyword.get(config, :event_coordination_enabled, true)
+        ),
+      wake_enabled: Keyword.get(opts, :wake_enabled, Keyword.get(config, :wake_enabled, true)),
+      wake_policy_overrides:
+        opts
+        |> Keyword.get(:wake_policy_overrides, Keyword.get(config, :wake_policy_overrides, %{}))
+        |> normalize_overrides(),
+      wake_policy_strict_inbox_priority:
+        Keyword.get(
+          opts,
+          :wake_policy_strict_inbox_priority,
+          Keyword.get(config, :wake_policy_strict_inbox_priority, true)
+        ),
+      inbox_store_opts:
+        Keyword.get(opts, :inbox_store_opts, Keyword.get(config, :inbox_store_opts, [])),
+      rebuild_target: Keyword.get(opts, :rebuild_target, Keyword.get(config, :rebuild_target)),
+      rebuild_notify_pid:
+        Keyword.get(opts, :rebuild_notify_pid, Keyword.get(config, :rebuild_notify_pid)),
       run_terminal_limit:
         Keyword.get(opts, :run_terminal_limit, Keyword.get(config, :run_terminal_limit, 1_000)),
       run_terminal_order: :queue.new(),
@@ -95,10 +146,179 @@ defmodule Men.Gateway.DispatchServer do
     {:reply, reply, new_state}
   end
 
+  def handle_call({:coordinate_event, inbound_event, runtime_overrides}, _from, state) do
+    {:reply, run_event_coordination(state, inbound_event, runtime_overrides), state}
+  end
+
   @impl true
   def handle_cast({:enqueue, inbound_event}, state) do
     {_reply, new_state} = run_dispatch(state, inbound_event)
     {:noreply, new_state}
+  end
+
+  defp run_event_coordination(state, inbound_event, runtime_overrides) do
+    with {:ok, envelope} <- EventEnvelope.normalize(inbound_event),
+         :ok <-
+           emit_telemetry([:event, :normalized], %{
+             event_id: envelope.event_id,
+             type: envelope.type
+           }),
+         {:ok, decided_envelope, decision} <- decide_policy(state, envelope, runtime_overrides),
+         :ok <-
+           emit_telemetry([:policy, :decided], %{
+             event_id: decided_envelope.event_id,
+             type: decided_envelope.type,
+             wake: decision.wake,
+             inbox_only: decision.inbox_only
+           }),
+         {:ok, store_tag, store_envelope} <-
+           store_inbox(decided_envelope, state.inbox_store_opts),
+         :ok <- emit_store_telemetry(store_tag, store_envelope) do
+      rebuild_triggered = maybe_trigger_rebuild(state, store_tag, store_envelope)
+
+      {:ok,
+       %{
+         envelope: store_envelope,
+         store_result: store_tag,
+         rebuild_triggered: rebuild_triggered
+       }}
+    else
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp decide_policy(state, envelope, runtime_overrides) do
+    policy_envelope = enforce_disabled_envelope(envelope, state.event_coordination_enabled)
+
+    coordination_overrides =
+      runtime_overrides
+      |> normalize_overrides()
+      |> maybe_force_inbox_only(state.event_coordination_enabled)
+      |> Map.put_new(:strict_inbox_priority, state.wake_policy_strict_inbox_priority)
+
+    merged_overrides = Map.merge(state.wake_policy_overrides, coordination_overrides)
+    WakePolicy.decide(policy_envelope, merged_overrides)
+  end
+
+  defp store_inbox(envelope, inbox_store_opts) do
+    case InboxStore.put(envelope, inbox_store_opts) do
+      {:ok, accepted} -> {:ok, :ok, accepted}
+      {:duplicate, accepted} -> {:ok, :duplicate, accepted}
+      {:stale, accepted} -> {:ok, :stale, accepted}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp emit_store_telemetry(:ok, _envelope), do: :ok
+
+  defp emit_store_telemetry(:duplicate, envelope) do
+    emit_telemetry([:inbox, :duplicate], %{event_id: envelope.event_id, type: envelope.type})
+  end
+
+  defp emit_store_telemetry(:stale, envelope) do
+    emit_telemetry([:inbox, :stale], %{
+      event_id: envelope.event_id,
+      type: envelope.type,
+      version: envelope.version
+    })
+  end
+
+  defp emit_store_telemetry(_other, _envelope), do: :ok
+
+  # 触发条件必须同时满足：入库成功 + wake=true + inbox_only=false + 功能开关开启。
+  defp maybe_trigger_rebuild(state, :ok, envelope) do
+    enabled? =
+      state.event_coordination_enabled and
+        state.wake_enabled and
+        envelope.wake == true and
+        envelope.inbox_only == false
+
+    if enabled? do
+      do_trigger_rebuild(state, envelope)
+
+      emit_telemetry([:dispatch, :rebuild_triggered], %{
+        event_id: envelope.event_id,
+        type: envelope.type
+      })
+
+      true
+    else
+      emit_telemetry([:dispatch, :rebuild_skipped], %{
+        event_id: envelope.event_id,
+        type: envelope.type,
+        store_result: :ok,
+        wake: envelope.wake,
+        inbox_only: envelope.inbox_only,
+        event_coordination_enabled: state.event_coordination_enabled,
+        wake_enabled: state.wake_enabled
+      })
+
+      false
+    end
+  end
+
+  defp maybe_trigger_rebuild(state, store_result, envelope) do
+    emit_telemetry([:dispatch, :rebuild_skipped], %{
+      event_id: envelope.event_id,
+      type: envelope.type,
+      store_result: store_result,
+      wake: envelope.wake,
+      inbox_only: envelope.inbox_only,
+      event_coordination_enabled: state.event_coordination_enabled,
+      wake_enabled: state.wake_enabled
+    })
+
+    false
+  end
+
+  defp do_trigger_rebuild(state, envelope) do
+    if is_pid(state.rebuild_notify_pid) do
+      send(state.rebuild_notify_pid, {:frame_rebuild_triggered, envelope})
+    end
+
+    if not is_nil(state.rebuild_target) do
+      GenServer.cast(state.rebuild_target, {:rebuild_frame, envelope})
+    end
+
+    :ok
+  rescue
+    error ->
+      Logger.warning("gateway.dispatch rebuild trigger failed error=#{inspect(error)}")
+      :ok
+  catch
+    kind, reason ->
+      Logger.warning(
+        "gateway.dispatch rebuild trigger failed kind=#{inspect(kind)} reason=#{inspect(reason)}"
+      )
+
+      :ok
+  end
+
+  defp emit_telemetry(path, metadata) when is_list(path) and is_map(metadata) do
+    :telemetry.execute([:men, :gateway | path], %{count: 1}, metadata)
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp normalize_overrides(overrides) when is_list(overrides), do: Map.new(overrides)
+  defp normalize_overrides(overrides) when is_map(overrides), do: overrides
+  defp normalize_overrides(_), do: %{}
+
+  # 关闭总线时强制降级到 inbox_only，保证事件仍可入箱且不触发重建。
+  defp enforce_disabled_envelope(envelope, true), do: envelope
+
+  defp enforce_disabled_envelope(envelope, false) do
+    %EventEnvelope{envelope | wake: nil, inbox_only: nil, force_wake: false}
+  end
+
+  defp maybe_force_inbox_only(overrides, true), do: overrides
+
+  defp maybe_force_inbox_only(overrides, false) do
+    overrides
+    |> Map.put(:wake, false)
+    |> Map.put(:inbox_only, true)
   end
 
   defp run_dispatch(state, inbound_event) do
@@ -253,7 +473,8 @@ defmodule Men.Gateway.DispatchServer do
 
   defp do_start_turn(state, context) do
     with {:ok, prompt} <- payload_to_prompt(context.payload),
-         {:ok, run_context} <- resolve_runtime_context(state, context.session_key, context.run_id, 1) do
+         {:ok, run_context} <-
+           resolve_runtime_context(state, context.session_key, context.run_id, 1) do
       case call_bridge(state, prompt, context, run_context) do
         {:ok, payload} ->
           {:ok, payload, run_context}
@@ -284,7 +505,9 @@ defmodule Men.Gateway.DispatchServer do
 
   defp maybe_retry_start_turn(state, context, prompt, run_context, error_payload) do
     if should_retry_session_not_found?(state, run_context, error_payload) do
-      log_transition(:retry_triggered, context, run_context, %{code: Map.get(error_payload, :code)})
+      log_transition(:retry_triggered, context, run_context, %{
+        code: Map.get(error_payload, :code)
+      })
 
       case rebuild_runtime_context(state, context.session_key, context.run_id, 2) do
         {:ok, retry_context} ->
@@ -301,7 +524,12 @@ defmodule Men.Gateway.DispatchServer do
     end
   end
 
-  defp resolve_runtime_context(%{session_coordinator_enabled: false}, session_key, run_id, attempt) do
+  defp resolve_runtime_context(
+         %{session_coordinator_enabled: false},
+         session_key,
+         run_id,
+         attempt
+       ) do
     {:ok,
      %{
        run_id: run_id,
@@ -329,7 +557,12 @@ defmodule Men.Gateway.DispatchServer do
     {:ok, run_context}
   end
 
-  defp rebuild_runtime_context(%{session_coordinator_enabled: false}, session_key, run_id, attempt) do
+  defp rebuild_runtime_context(
+         %{session_coordinator_enabled: false},
+         session_key,
+         run_id,
+         attempt
+       ) do
     {:ok,
      %{
        run_id: run_id,
@@ -349,7 +582,12 @@ defmodule Men.Gateway.DispatchServer do
           attempt: attempt
         }
 
-        log_transition(:session_resolved, %{run_id: run_id, session_key: session_key}, run_context)
+        log_transition(
+          :session_resolved,
+          %{run_id: run_id, session_key: session_key},
+          run_context
+        )
+
         {:ok, run_context}
 
       {:error, reason} ->
@@ -397,8 +635,12 @@ defmodule Men.Gateway.DispatchServer do
     normalized_code == "session_not_found"
   end
 
-  defp normalize_error_code(code) when is_atom(code), do: code |> Atom.to_string() |> String.downcase()
-  defp normalize_error_code(code) when is_binary(code), do: code |> String.trim() |> String.downcase()
+  defp normalize_error_code(code) when is_atom(code),
+    do: code |> Atom.to_string() |> String.downcase()
+
+  defp normalize_error_code(code) when is_binary(code),
+    do: code |> String.trim() |> String.downcase()
+
   defp normalize_error_code(_), do: ""
 
   defp do_send_final(state, context, bridge_payload) do
@@ -451,7 +693,8 @@ defmodule Men.Gateway.DispatchServer do
 
     %{
       next_state
-      | session_last_context: Map.put(state.session_last_context, context.session_key, run_context),
+      | session_last_context:
+          Map.put(state.session_last_context, context.session_key, run_context),
         run_terminal_results: next_state.run_terminal_results,
         run_terminal_order: next_state.run_terminal_order
     }
@@ -487,7 +730,8 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   # egress 失败时不记录已处理，允许同 run_id 做恢复性重试。
-  defp maybe_mark_terminal(state, _context, _run_context, _reply, %{code: "EGRESS_ERROR"}), do: state
+  defp maybe_mark_terminal(state, _context, _run_context, _reply, %{code: "EGRESS_ERROR"}),
+    do: state
 
   defp maybe_mark_terminal(state, context, run_context, reply, _error_payload),
     do: mark_terminal(state, context, run_context, reply)
