@@ -67,10 +67,16 @@ allow_edges:
   - caller: repl_state_plane
     callee: foundation_infra
     rationale: state plane uses telemetry and persistence contracts
+  - caller: repl_state_plane
+    callee: infra_event_audit
+    rationale: state mutations must be written as structured audit events
 
   - caller: event_signal_plane
     callee: foundation_infra
     rationale: event plane uses PubSub and telemetry contracts
+  - caller: event_signal_plane
+    callee: infra_event_audit
+    rationale: event ingest/wake decisions must be auditable and replayable
   - caller: event_signal_plane
     callee: repl_state_plane
     rationale: inbox/event metadata stored in state plane for replayable frame rebuild
@@ -105,6 +111,9 @@ forbid_edges:
   - caller: foundation_infra
     callee: plugin_tool_extension
     rationale: infra must not depend on plugin implementations
+  - caller: infra_event_audit
+    callee: gateway_control_plane
+    rationale: audit infra must not depend on business control logic
   - caller: repl_acl
     callee: gateway_control_plane
     rationale: ACL layer must not import control-plane internals

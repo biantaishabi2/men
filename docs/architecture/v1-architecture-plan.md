@@ -20,6 +20,7 @@
 
 6. `foundation_infra`
 - owns config, telemetry, persistence, idempotency, shared contracts
+- owns event-audit logging substrate (structured event logs + replay index)
 
 7. `ops_client_entry`
 - owns LiveView admin, ops endpoints, manual control tools
@@ -61,6 +62,7 @@
 - `telemetry`
 - `security`
 - `idempotency`
+- `event_audit`
 
 ## Control/Data Separation Contract (V1.1 addendum)
 
@@ -78,6 +80,10 @@
 - realtime notifications travel through `event_signal_plane` (PubSub).
 - events are lightweight; detailed payload stays in `repl_state_plane`.
 - wake decision is policy-driven (`wake=true` vs `inbox_only`).
+
+5. Frame budget policy:
+- frame summary budget is percentage-based, not fixed literal size.
+- default policy: up to `15%` of model context window, with a configurable hard cap.
 
 ## Adapter Contracts (must keep stable)
 

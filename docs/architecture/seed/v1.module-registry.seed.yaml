@@ -152,6 +152,19 @@ modules:
         - lib/men/repo.ex
         - lib/men/application.ex
 
+  # foundation_infra 子模块：事件审计与可观测基建
+  - module_id: infra_event_audit
+    display_name: Event Audit Infra（结构化事件日志/回放索引）
+    domain_kind: infrastructure
+    layer: infrastructure
+    precedence: 61
+    parent: foundation_infra
+    path_rules:
+      include:
+        - lib/men/infra/event_audit.ex
+        - lib/men/telemetry/event_audit.ex
+        - lib/men/telemetry/log_schema.ex
+
   - module_id: ops_client_entry
     display_name: Ops Client Entry
     domain_kind: infrastructure
