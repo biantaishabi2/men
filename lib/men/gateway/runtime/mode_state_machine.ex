@@ -93,7 +93,17 @@ defmodule Men.Gateway.Runtime.ModeStateMachine do
       |> maybe_record_transition(transition?, tick, config)
       |> maybe_enter_safety_mode(transition?, next_mode, tick, config)
 
-    reason = if is_nil(safety_reason), do: final_reason, else: safety_reason
+    reason =
+      cond do
+        transition? ->
+          final_reason
+
+        is_nil(safety_reason) ->
+          final_reason
+
+        true ->
+          safety_reason
+      end
 
     meta = %{
       transition?: transition?,

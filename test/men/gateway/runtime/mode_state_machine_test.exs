@@ -152,4 +152,27 @@ defmodule Men.Gateway.Runtime.ModeStateMachineTest do
     assert mode == :research
     assert meta.hysteresis_state.exit_threshold == 0.70
   end
+
+  test "安全模式恢复当轮若发生迁移，reason 应保持真实迁移原因" do
+    context = %{
+      ModeStateMachine.initial_context()
+      | safety_mode: true,
+        recovery_remaining: 1,
+        stable_graph_ticks: 0
+    }
+
+    {mode, context, meta} =
+      ModeStateMachine.decide(
+        :execute,
+        %{blocking_count: 0, key_claim_confidence: 0.82, graph_change_rate: 0.01},
+        context,
+        %{stable_window_ticks: 1, enter_threshold: 0.75}
+      )
+
+    assert mode == :plan
+    assert context.safety_mode == false
+    assert meta.transition? == true
+    assert meta.to_mode == :plan
+    assert meta.reason == :confidence_and_stability_satisfied
+  end
 end
