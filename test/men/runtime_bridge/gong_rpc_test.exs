@@ -39,6 +39,24 @@ defmodule Men.RuntimeBridge.GongRPCTest do
           send(self(), {:session_event, %{type: "lifecycle.completed"}})
           :ok
 
+        :with_delta ->
+          send(self(), {:session_event, %{type: "message.delta", payload: %{content: "part-1"}}})
+          send(self(), {:session_event, %{type: "message.delta", payload: %{content: "part-2"}}})
+          send(self(), {:session_event, %{type: "lifecycle.result", payload: %{assistant_text: "rpc ok"}}})
+          send(self(), {:session_event, %{type: "lifecycle.completed"}})
+          :ok
+
+        :with_noise_events ->
+          send(self(), {:session_event, %{type: "lifecycle.received", payload: %{}}})
+          send(self(), {:session_event, %{type: "message.start", payload: %{}}})
+          send(self(), {:session_event, %{type: "tool.start", payload: %{tool_name: "list_directory"}}})
+          send(self(), {:session_event, %{type: "message.delta", payload: %{content: "part-a"}}})
+          send(self(), {:session_event, %{type: "tool.end", payload: %{tool_name: "list_directory"}}})
+          send(self(), {:session_event, %{type: "message.end", payload: %{}}})
+          send(self(), {:session_event, %{type: "lifecycle.result", payload: %{assistant_text: "rpc noisy ok"}}})
+          send(self(), {:session_event, %{type: "lifecycle.completed"}})
+          :ok
+
         :session_not_found_once ->
           mark = :prompt_once_global
           count = Process.get(mark, 0) + 1
@@ -149,6 +167,57 @@ defmodule Men.RuntimeBridge.GongRPCTest do
     assert_receive {:rpc_create_session, :success}
     refute_receive {:rpc_create_session, :success}
     refute_receive {:rpc_close_session, _}
+  end
+
+  test "传入 event_callback 时会实时收到 delta 事件" do
+    Application.put_env(:men, :gong_rpc_test_mode, :with_delta)
+    parent = self()
+
+    callback = fn event -> send(parent, {:stream_event, event}) end
+
+    assert {:ok, payload} =
+             GongRPC.start_turn("hello-delta", %{
+               request_id: "req-rpc-delta-1",
+               session_key: "dingtalk:delta",
+               run_id: "run-rpc-delta-1",
+               event_callback: callback
+             })
+
+    assert payload.text == "rpc ok"
+    assert_receive {:stream_event, %{type: :delta, payload: %{text: "part-1"}}}
+    assert_receive {:stream_event, %{type: :delta, payload: %{text: "part-2"}}}
+  end
+
+  test "混合生命周期噪音事件时仍可完成，并返回正确文本" do
+    Application.put_env(:men, :gong_rpc_test_mode, :with_noise_events)
+
+    assert {:ok, payload} =
+             GongRPC.start_turn("hello-noise", %{
+               request_id: "req-rpc-noise-1",
+               session_key: "dingtalk:noise",
+               run_id: "run-rpc-noise-1"
+             })
+
+    assert payload.text == "rpc noisy ok"
+  end
+
+  test "tool.start/tool.end 不会额外映射为 delta 回调（保持工具过程静默）" do
+    Application.put_env(:men, :gong_rpc_test_mode, :with_noise_events)
+    parent = self()
+    callback = fn event -> send(parent, {:stream_event, event}) end
+
+    assert {:ok, payload} =
+             GongRPC.start_turn("hello-noise-tool", %{
+               request_id: "req-rpc-noise-tool-1",
+               session_key: "dingtalk:noise-tool",
+               run_id: "run-rpc-noise-tool-1",
+               event_callback: callback
+             })
+
+    assert payload.text == "rpc noisy ok"
+    assert_receive {:stream_event, %{type: :delta, payload: %{text: "part-a"}}}
+    refute_receive {:stream_event, %{type: :delta, payload: %{text: "\n[tool:start] list_directory\n"}}}
+    refute_receive {:stream_event, %{type: :delta, payload: %{text: "\n[tool:end] list_directory\n"}}}
   end
 
   test "会话失效时触发关闭并重建" do

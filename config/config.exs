@@ -15,7 +15,7 @@ config :men, Men.Gateway.DispatchServer,
   bridge_adapter: Men.RuntimeBridge.GongCLI,
   egress_adapter: Men.Channels.Egress.RouterAdapter,
   storage_adapter: :memory,
-  chat_streaming_enabled: true
+  streaming_enabled: true
 
 config :men, Men.Channels.Ingress.FeishuAdapter,
   sign_mode: :strict,
@@ -25,6 +25,9 @@ config :men, Men.Channels.Ingress.FeishuAdapter,
 config :men, Men.Channels.Egress.FeishuAdapter,
   base_url: "https://open.feishu.cn",
   bots: %{}
+
+config :men, Men.Channels.Egress.DingtalkRobotAdapter,
+  stream_output_mode: :final_only
 
 # Configures the endpoint
 config :men, MenWeb.Endpoint,

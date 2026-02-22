@@ -9,7 +9,11 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
 
   @behaviour Men.Channels.Egress.Adapter
 
-  alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
+  alias Men.Channels.Egress.Messages.{ErrorMessage, EventMessage, FinalMessage}
+  require Logger
+
+  @stream_state_table :men_dingtalk_stream_state
+  @default_stream_state_ttl_ms 300_000
 
   defmodule HttpTransport do
     @moduledoc false
@@ -42,11 +46,19 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
 
   @impl true
   def send(target, %FinalMessage{} = message) do
-    send_text(target, build_final_text(message))
+    with {:ok, cfg} <- load_config() do
+      maybe_send_final(target, message, cfg)
+    end
   end
 
   def send(target, %ErrorMessage{} = message) do
     send_text(target, build_error_text(message))
+  end
+
+  def send(target, %EventMessage{} = message) do
+    with {:ok, cfg} <- load_config() do
+      maybe_send_event(target, message, cfg)
+    end
   end
 
   def send(_target, _message), do: {:error, :unsupported_message}
@@ -55,6 +67,81 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
     with {:ok, cfg} <- load_config() do
       do_send(target, content, cfg)
     end
+  end
+
+  # 钉钉普通机器人不支持同消息增量更新，默认 delta_only 防止出现“分片 + 最终”双回复。
+  defp maybe_send_final(target, %FinalMessage{} = message, cfg) do
+    run_id = metadata_value(message.metadata, :run_id, nil)
+    log_meta = stream_log_meta(target, message.metadata, message.session_key)
+
+    if suppress_final?(cfg, run_id) do
+      Logger.info("dingtalk_robot_egress.final_suppress",
+        stream_output_mode: cfg.stream_output_mode,
+        run_id: log_meta.run_id,
+        request_id: log_meta.request_id,
+        session_key: log_meta.session_key
+      )
+
+      clear_stream_state(run_id)
+      :ok
+    else
+      Logger.info("dingtalk_robot_egress.final_emit",
+        stream_output_mode: cfg.stream_output_mode,
+        run_id: log_meta.run_id,
+        request_id: log_meta.request_id,
+        session_key: log_meta.session_key
+      )
+
+      do_send(target, build_final_text(message), cfg)
+    end
+  end
+
+  defp maybe_send_event(target, %EventMessage{event_type: :delta} = message, %{stream_output_mode: :final_only} = cfg) do
+    log_meta = stream_log_meta(target, message.metadata, nil)
+
+    Logger.info("dingtalk_robot_egress.delta_drop",
+      stream_output_mode: cfg.stream_output_mode,
+      run_id: log_meta.run_id,
+      request_id: log_meta.request_id,
+      session_key: log_meta.session_key
+    )
+
+    :ok
+  end
+
+  defp maybe_send_event(target, %EventMessage{} = message, cfg) do
+    content = build_event_text(message)
+    result = do_send(target, content, cfg)
+
+    case {result, message.event_type} do
+      {:ok, :delta} ->
+        run_id = metadata_value(message.metadata, :run_id, nil)
+        mark_stream_delta_sent(run_id, cfg.stream_state_ttl_ms)
+
+        log_meta = stream_log_meta(target, message.metadata, nil)
+
+        Logger.info("dingtalk_robot_egress.delta_emit",
+          stream_output_mode: cfg.stream_output_mode,
+          content_len: String.length(content),
+          run_id: log_meta.run_id,
+          request_id: log_meta.request_id,
+          session_key: log_meta.session_key
+        )
+
+        :ok
+
+      _ ->
+        result
+    end
+  end
+
+  defp stream_log_meta(target, metadata, fallback_session_key) do
+    %{
+      run_id: metadata_value(metadata, :run_id, nil),
+      request_id: metadata_value(metadata, :request_id, nil),
+      session_key:
+        metadata_value(metadata, :session_key, fallback_session_key) || to_string(target || "")
+    }
   end
 
   defp do_send(_target, content, %{mode: :webhook} = cfg) do
@@ -150,6 +237,15 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
                  "DINGTALK_ROBOT_MARKDOWN_TITLE",
                  "Men"
                ),
+             stream_output_mode:
+               parse_stream_output_mode(
+                 cfg_value(app_cfg, :stream_output_mode, "DINGTALK_STREAM_OUTPUT_MODE")
+               ),
+             stream_state_ttl_ms:
+               parse_positive_integer(
+                 cfg_value(app_cfg, :stream_state_ttl_ms, "DINGTALK_STREAM_STATE_TTL_MS"),
+                 @default_stream_state_ttl_ms
+               ),
              transport: transport,
              request_opts: request_opts
            }}
@@ -198,12 +294,46 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
                  "DINGTALK_ROBOT_OTO_SEND_URL",
                  "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
                ),
+             stream_output_mode:
+               parse_stream_output_mode(
+                 cfg_value(app_cfg, :stream_output_mode, "DINGTALK_STREAM_OUTPUT_MODE")
+               ),
+             stream_state_ttl_ms:
+               parse_positive_integer(
+                 cfg_value(app_cfg, :stream_state_ttl_ms, "DINGTALK_STREAM_STATE_TTL_MS"),
+                 @default_stream_state_ttl_ms
+               ),
              transport: transport,
              request_opts: request_opts
            }}
         end
     end
   end
+
+  defp parse_stream_output_mode(value) when value in [:delta_plus_final, :delta_only, :final_only],
+    do: value
+
+  defp parse_stream_output_mode(value) when is_binary(value) do
+    case String.downcase(String.trim(value)) do
+      "delta_plus_final" -> :delta_plus_final
+      "final_only" -> :final_only
+      _ -> :delta_only
+    end
+  end
+
+  # 纯文本机器人默认 final_only，避免视觉上刷屏；真正流式卡片能力单独实现。
+  defp parse_stream_output_mode(_), do: :final_only
+
+  defp parse_positive_integer(value, _default) when is_integer(value) and value > 0, do: value
+
+  defp parse_positive_integer(value, default) when is_binary(value) do
+    case Integer.parse(value) do
+      {parsed, ""} when parsed > 0 -> parsed
+      _ -> default
+    end
+  end
+
+  defp parse_positive_integer(_value, default), do: default
 
   defp build_webhook_body(content, cfg) do
     case cfg.msg_key do
@@ -229,6 +359,72 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
       is_binary(webhook_url) and webhook_url != "" -> :webhook
       true -> :webhook
     end
+  end
+
+  defp suppress_final?(%{stream_output_mode: :delta_plus_final}, _run_id), do: false
+  defp suppress_final?(%{stream_output_mode: :final_only}, _run_id), do: false
+  defp suppress_final?(%{stream_output_mode: :delta_only}, run_id), do: delta_seen_recently?(run_id)
+  defp suppress_final?(_cfg, _run_id), do: false
+
+  defp mark_stream_delta_sent(run_id, ttl_ms) when is_binary(run_id) and run_id != "" do
+    ensure_stream_state_table!()
+    expire_at_ms = System.monotonic_time(:millisecond) + ttl_ms
+    :ets.insert(@stream_state_table, {run_id, expire_at_ms})
+    :ok
+  end
+
+  defp mark_stream_delta_sent(_run_id, _ttl_ms), do: :ok
+
+  defp delta_seen_recently?(run_id) when is_binary(run_id) and run_id != "" do
+    ensure_stream_state_table!()
+    now_ms = System.monotonic_time(:millisecond)
+
+    case :ets.lookup(@stream_state_table, run_id) do
+      [{^run_id, expire_at_ms}] when is_integer(expire_at_ms) and expire_at_ms > now_ms ->
+        true
+
+      [{^run_id, _expire_at_ms}] ->
+        :ets.delete(@stream_state_table, run_id)
+        false
+
+      _ ->
+        false
+    end
+  end
+
+  defp delta_seen_recently?(_run_id), do: false
+
+  defp clear_stream_state(run_id) when is_binary(run_id) and run_id != "" do
+    if :ets.whereis(@stream_state_table) != :undefined do
+      :ets.delete(@stream_state_table, run_id)
+    end
+
+    :ok
+  end
+
+  defp clear_stream_state(_run_id), do: :ok
+
+  defp ensure_stream_state_table! do
+    case :ets.whereis(@stream_state_table) do
+      :undefined ->
+        _ = :ets.new(@stream_state_table, [:named_table, :public, :set, read_concurrency: true])
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    ArgumentError ->
+      :ok
+  end
+
+  @doc false
+  def __reset_stream_state_for_test__ do
+    if :ets.whereis(@stream_state_table) != :undefined do
+      :ets.delete_all_objects(@stream_state_table)
+    end
+
+    :ok
   end
 
   defp fetch_app_access_token(cfg) do
@@ -376,6 +572,50 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
       "[request_id=#{request_id} run_id=#{run_id}] #{code}#{message.reason}"
     else
       "#{code}#{message.reason}"
+    end
+  end
+
+  defp build_event_text(%EventMessage{event_type: :delta, payload: payload, metadata: metadata}) do
+    text =
+      case payload do
+        %{text: value} when is_binary(value) -> value
+        %{"text" => value} when is_binary(value) -> value
+        value when is_binary(value) -> value
+        _ -> ""
+      end
+
+    if include_trace_prefix?() do
+      request_id = metadata_value(metadata, :request_id, "unknown_request")
+      run_id = metadata_value(metadata, :run_id, "unknown_run")
+      "[request_id=#{request_id} run_id=#{run_id}] #{text}"
+    else
+      text
+    end
+  end
+
+  defp build_event_text(%EventMessage{event_type: :error, payload: payload, metadata: metadata}) do
+    reason =
+      case payload do
+        %{reason: value} when is_binary(value) -> value
+        %{"reason" => value} when is_binary(value) -> value
+        _ -> "runtime stream error"
+      end
+
+    if include_trace_prefix?() do
+      request_id = metadata_value(metadata, :request_id, "unknown_request")
+      run_id = metadata_value(metadata, :run_id, "unknown_run")
+      "[request_id=#{request_id} run_id=#{run_id}] #{reason}"
+    else
+      reason
+    end
+  end
+
+  defp build_event_text(%EventMessage{payload: payload}) do
+    case payload do
+      %{text: value} when is_binary(value) -> value
+      %{"text" => value} when is_binary(value) -> value
+      value when is_binary(value) -> value
+      _ -> ""
     end
   end
 

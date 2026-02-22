@@ -6,7 +6,7 @@ defmodule Men.Gateway.DispatchServer do
   use GenServer
   require Logger
 
-  alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
+  alias Men.Channels.Egress.Messages.{ErrorMessage, EventMessage, FinalMessage}
   alias Men.Gateway.SessionCoordinator
   alias Men.Gateway.Types
   alias Men.Routing.SessionKey
@@ -15,6 +15,7 @@ defmodule Men.Gateway.DispatchServer do
           bridge_adapter: module(),
           egress_adapter: module(),
           storage_adapter: term(),
+          streaming_enabled: boolean(),
           session_coordinator_enabled: boolean(),
           session_coordinator_name: GenServer.server(),
           processed_run_ids: MapSet.t(binary()),
@@ -67,6 +68,12 @@ defmodule Men.Gateway.DispatchServer do
       egress_adapter: Keyword.get(opts, :egress_adapter, Keyword.fetch!(config, :egress_adapter)),
       storage_adapter:
         Keyword.get(opts, :storage_adapter, Keyword.get(config, :storage_adapter, :memory)),
+      streaming_enabled:
+        Keyword.get(
+          opts,
+          :streaming_enabled,
+          Keyword.get(config, :streaming_enabled, Keyword.get(config, :chat_streaming_enabled, false))
+        ),
       session_coordinator_enabled:
         Keyword.get(opts, :session_coordinator_enabled, Keyword.get(coordinator_config, :enabled, true)),
       session_coordinator_name:
@@ -88,6 +95,20 @@ defmodule Men.Gateway.DispatchServer do
   def handle_cast({:enqueue, inbound_event}, state) do
     {_reply, new_state} = run_dispatch(state, inbound_event)
     {:noreply, new_state}
+  end
+
+  @impl true
+  def handle_info({:session_event, event}, state) when is_map(event) do
+    # GongRPC 订阅会把完整 session 事件流投递到当前进程。
+    # 主链路只消费关键信号，其余事件在这里兜底吞掉，避免 error 噪音。
+    Logger.debug("dispatch_server.session_event.ignored", event: summarize_session_event(event))
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(message, state) do
+    Logger.error("#{inspect(__MODULE__)} received unexpected message in handle_info/2: #{inspect(message)}")
+    {:noreply, state}
   end
 
   defp run_dispatch(state, inbound_event) do
@@ -170,6 +191,16 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   defp summarize_event(other), do: %{raw: inspect(other)}
+
+  defp summarize_session_event(event) do
+    %{
+      type: Map.get(event, :type, Map.get(event, "type")),
+      seq: Map.get(event, :seq, Map.get(event, "seq")),
+      session_id: Map.get(event, :session_id, Map.get(event, "session_id")),
+      turn_id: Map.get(event, :turn_id, Map.get(event, "turn_id")),
+      command_id: Map.get(event, :command_id, Map.get(event, "command_id"))
+    }
+  end
 
   # 错误回写失败时统一抬升为 egress 失败，避免调用方误判。
   defp ensure_error_egress_result(state, context, error_payload) do
@@ -262,12 +293,14 @@ defmodule Men.Gateway.DispatchServer do
   defp do_start_turn(state, context) do
     runtime_session_id = resolve_runtime_session_id(state, context.session_key)
 
-    bridge_context = %{
+    bridge_context =
+      %{
       request_id: context.request_id,
       session_key: runtime_session_id,
       external_session_key: context.session_key,
       run_id: context.run_id
     }
+      |> maybe_put_event_callback(state, context)
 
     with {:ok, prompt} <- payload_to_prompt(context.payload) do
       case state.bridge_adapter.start_turn(prompt, bridge_context) do
@@ -287,6 +320,30 @@ defmodule Men.Gateway.DispatchServer do
            message: "payload encode failed",
            details: %{reason: inspect(reason)}
          }, context}
+    end
+  end
+
+  defp maybe_put_event_callback(context_map, %{streaming_enabled: true} = state, context) do
+    Map.put(context_map, :event_callback, build_event_callback(state, context))
+  end
+
+  defp maybe_put_event_callback(context_map, _state, _context), do: context_map
+
+  defp build_event_callback(state, context) do
+    fn event ->
+      case do_send_event(state, context, event) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("dispatch_server.run_dispatch.event_egress_error",
+            request_id: context.request_id,
+            run_id: context.run_id,
+            reason: inspect(reason)
+          )
+
+          :ok
+      end
     end
   end
 
@@ -391,6 +448,36 @@ defmodule Men.Gateway.DispatchServer do
 
     state.egress_adapter.send(context.session_key, message)
   end
+
+  defp do_send_event(state, context, %{type: :delta, payload: payload}) do
+    text =
+      payload
+      |> normalize_stream_payload()
+      |> Map.get(:text, "")
+
+    message = %EventMessage{
+      event_type: :delta,
+      payload: %{text: text},
+      metadata:
+        context.metadata
+        |> Map.merge(%{
+          request_id: context.request_id,
+          run_id: context.run_id,
+          session_key: context.session_key,
+          seq: System.unique_integer([:positive, :monotonic]),
+          timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+        })
+    }
+
+    state.egress_adapter.send(context.session_key, message)
+  end
+
+  defp do_send_event(_state, _context, _event), do: :ok
+
+  defp normalize_stream_payload(%{text: text}) when is_binary(text), do: %{text: text}
+  defp normalize_stream_payload(%{"text" => text}) when is_binary(text), do: %{text: text}
+  defp normalize_stream_payload(text) when is_binary(text), do: %{text: text}
+  defp normalize_stream_payload(_), do: %{text: ""}
 
   defp mark_processed(state, context) do
     %{

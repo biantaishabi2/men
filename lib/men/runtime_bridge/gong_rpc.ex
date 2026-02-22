@@ -53,6 +53,7 @@ defmodule Men.RuntimeBridge.GongRPC do
     request_id = context_value(context, :request_id, "unknown_request")
     session_key = context_value(context, :session_key, "unknown_session")
     run_id = context_value(context, :run_id, generate_run_id())
+    event_callback = event_callback_from_context(context)
 
     with {:ok, gong_node} <- connector.ensure_connected(cfg, rpc_client),
          :ok <- maybe_cleanup_sessions(gong_node, rpc_client, cfg, rpc_timeout_ms),
@@ -65,6 +66,7 @@ defmodule Men.RuntimeBridge.GongRPC do
              request_id,
              session_key,
              run_id,
+             event_callback,
              rpc_timeout_ms,
              completion_timeout_ms
            ) do
@@ -131,6 +133,7 @@ defmodule Men.RuntimeBridge.GongRPC do
          request_id,
          session_key,
          run_id,
+         event_callback,
          rpc_timeout_ms,
          completion_timeout_ms
        ) do
@@ -154,7 +157,8 @@ defmodule Men.RuntimeBridge.GongRPC do
              completion_timeout_ms,
              request_id,
              session_key,
-             run_id
+             run_id,
+             event_callback
            ) do
         {:ok, text} ->
           touch_session_entry(session_key)
@@ -191,7 +195,8 @@ defmodule Men.RuntimeBridge.GongRPC do
                      completion_timeout_ms,
                      request_id,
                      session_key,
-                     run_id
+                     run_id,
+                     event_callback
                    ) do
               touch_session_entry(session_key)
               {:ok, rebuilt_text, rebuilt_entry, false}
@@ -213,7 +218,8 @@ defmodule Men.RuntimeBridge.GongRPC do
          completion_timeout_ms,
          request_id,
          session_key,
-         run_id
+         run_id,
+         event_callback
        ) do
     with :ok <- subscribe_session(gong_node, session_pid, rpc_client, rpc_timeout_ms, request_id, session_key, run_id),
          :ok <- prompt_session(gong_node, session_pid, prompt, rpc_client, rpc_timeout_ms, request_id, session_key, run_id),
@@ -226,7 +232,8 @@ defmodule Men.RuntimeBridge.GongRPC do
              completion_timeout_ms,
              request_id,
              session_key,
-             run_id
+             run_id,
+             event_callback
            ) do
       {:ok, text}
     end
@@ -518,7 +525,8 @@ defmodule Men.RuntimeBridge.GongRPC do
          completion_timeout_ms,
          request_id,
          session_key,
-         run_id
+         run_id,
+         event_callback
        ) do
     deadline_ms = System.monotonic_time(:millisecond) + completion_timeout_ms
 
@@ -533,7 +541,8 @@ defmodule Men.RuntimeBridge.GongRPC do
       rpc_timeout_ms,
       request_id,
       session_key,
-      run_id
+      run_id,
+      event_callback
     )
   end
 
@@ -548,13 +557,16 @@ defmodule Men.RuntimeBridge.GongRPC do
          rpc_timeout_ms,
          request_id,
          session_key,
-         run_id
+         run_id,
+         event_callback
        ) do
     remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
 
     receive do
       {:session_event, %{type: "message.delta", payload: payload}} when is_map(payload) ->
-        next_delta = delta_text <> to_string(Map.get(payload, :content, Map.get(payload, "content", "")))
+        delta_chunk = to_string(Map.get(payload, :content, Map.get(payload, "content", "")))
+        next_delta = delta_text <> delta_chunk
+        emit_event(event_callback, %{type: :delta, payload: %{text: delta_chunk}})
 
         do_await_completion(
           deadline_ms,
@@ -567,7 +579,8 @@ defmodule Men.RuntimeBridge.GongRPC do
           rpc_timeout_ms,
           request_id,
           session_key,
-          run_id
+          run_id,
+          event_callback
         )
 
       {:session_event, %{type: "lifecycle.result", payload: payload}} when is_map(payload) ->
@@ -590,7 +603,8 @@ defmodule Men.RuntimeBridge.GongRPC do
           rpc_timeout_ms,
           request_id,
           session_key,
-          run_id
+          run_id,
+          event_callback
         )
 
       {:session_event, %{type: "lifecycle.error", error: error}} ->
@@ -610,6 +624,24 @@ defmodule Men.RuntimeBridge.GongRPC do
         else
           {:ok, text}
         end
+
+      {:session_event, _other_event} ->
+        # 会话事件流中包含大量生命周期/工具事件，这些不是 completion 判定条件。
+        # 显式消费后继续等待，避免残留到上层 GenServer mailbox。
+        do_await_completion(
+          deadline_ms,
+          completion_timeout_ms,
+          result_text,
+          delta_text,
+          gong_node,
+          session_pid,
+          rpc_client,
+          rpc_timeout_ms,
+          request_id,
+          session_key,
+          run_id,
+          event_callback
+        )
     after
       remaining_ms ->
         {:error,
@@ -671,6 +703,23 @@ defmodule Men.RuntimeBridge.GongRPC do
     context
     |> Map.get(key, Map.get(context, Atom.to_string(key), default))
     |> normalize_context_value(default)
+  end
+
+  defp event_callback_from_context(context) when is_map(context) do
+    callback = Map.get(context, :event_callback, Map.get(context, "event_callback"))
+    if is_function(callback, 1), do: callback, else: nil
+  end
+
+  defp event_callback_from_context(_), do: nil
+
+  defp emit_event(nil, _event), do: :ok
+
+  defp emit_event(callback, event) when is_function(callback, 1) do
+    try do
+      callback.(event)
+    rescue
+      _ -> :ok
+    end
   end
 
   defp normalize_context_value(nil, default), do: default

@@ -2,7 +2,7 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapterTest do
   use ExUnit.Case, async: true
 
   alias Men.Channels.Egress.DingtalkRobotAdapter
-  alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
+  alias Men.Channels.Egress.Messages.{ErrorMessage, EventMessage, FinalMessage}
 
   defmodule MockTransport do
     @behaviour Men.Channels.Egress.DingtalkRobotAdapter.HttpTransport
@@ -41,16 +41,19 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapterTest do
   end
 
   setup do
+    DingtalkRobotAdapter.__reset_stream_state_for_test__()
     Application.put_env(:men, :dingtalk_robot_test_pid, self())
     Application.put_env(:men, :dingtalk_robot_test_mode, :ok)
 
     Application.put_env(:men, DingtalkRobotAdapter,
       webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=test-token",
       sign_enabled: false,
+      stream_output_mode: :delta_only,
       transport: MockTransport
     )
 
     on_exit(fn ->
+      DingtalkRobotAdapter.__reset_stream_state_for_test__()
       Application.delete_env(:men, :dingtalk_robot_test_pid)
       Application.delete_env(:men, :dingtalk_robot_test_mode)
       Application.delete_env(:men, DingtalkRobotAdapter)
@@ -88,6 +91,97 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapterTest do
     assert_receive {:transport_request, :post, _url, _headers, body}
     decoded = Jason.decode!(body)
     assert decoded["text"]["content"] == "[BRIDGE_FAIL] bridge failed"
+  end
+
+  test "发送 EventMessage(delta) 成功" do
+    message = %EventMessage{
+      event_type: :delta,
+      payload: %{text: "partial"},
+      metadata: %{request_id: "req-delta-1", run_id: "run-delta-1", session_key: "dingtalk:u1"}
+    }
+
+    assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", message)
+    assert_receive {:transport_request, :post, _url, _headers, body}
+    decoded = Jason.decode!(body)
+    assert decoded["text"]["content"] == "partial"
+  end
+
+  test "delta_only 模式下 delta 后会抑制同 run_id 的 final，避免双回复" do
+    delta = %EventMessage{
+      event_type: :delta,
+      payload: %{text: "part-1"},
+      metadata: %{request_id: "req-s1", run_id: "run-s1", session_key: "dingtalk:u1"}
+    }
+
+    final = %FinalMessage{
+      session_key: "dingtalk:u1",
+      content: "full-text",
+      metadata: %{request_id: "req-s1", run_id: "run-s1"}
+    }
+
+    assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", delta)
+    assert_receive {:transport_request, :post, _url, _headers, body1}
+    assert Jason.decode!(body1)["text"]["content"] == "part-1"
+
+    assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", final)
+    refute_receive {:transport_request, :post, _url, _headers, _body}, 100
+  end
+
+  test "final_only 模式下会忽略 delta，仅发送 final" do
+    Application.put_env(:men, DingtalkRobotAdapter,
+      webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=test-token",
+      sign_enabled: false,
+      stream_output_mode: :final_only,
+      transport: MockTransport
+    )
+
+    delta = %EventMessage{
+      event_type: :delta,
+      payload: %{text: "part-2"},
+      metadata: %{request_id: "req-s2", run_id: "run-s2", session_key: "dingtalk:u1"}
+    }
+
+    final = %FinalMessage{
+      session_key: "dingtalk:u1",
+      content: "final-only",
+      metadata: %{request_id: "req-s2", run_id: "run-s2"}
+    }
+
+    assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", delta)
+    refute_receive {:transport_request, :post, _url, _headers, _body}, 100
+
+    assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", final)
+    assert_receive {:transport_request, :post, _url, _headers, body}
+    assert Jason.decode!(body)["text"]["content"] == "final-only"
+  end
+
+  test "delta_plus_final 模式下会同时发送 delta 与 final" do
+    Application.put_env(:men, DingtalkRobotAdapter,
+      webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=test-token",
+      sign_enabled: false,
+      stream_output_mode: :delta_plus_final,
+      transport: MockTransport
+    )
+
+    delta = %EventMessage{
+      event_type: :delta,
+      payload: %{text: "part-3"},
+      metadata: %{request_id: "req-s3", run_id: "run-s3", session_key: "dingtalk:u1"}
+    }
+
+    final = %FinalMessage{
+      session_key: "dingtalk:u1",
+      content: "final-plus",
+      metadata: %{request_id: "req-s3", run_id: "run-s3"}
+    }
+
+    assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", delta)
+    assert_receive {:transport_request, :post, _url, _headers, body1}
+    assert Jason.decode!(body1)["text"]["content"] == "part-3"
+
+    assert :ok = DingtalkRobotAdapter.send("dingtalk:u1", final)
+    assert_receive {:transport_request, :post, _url, _headers, body2}
+    assert Jason.decode!(body2)["text"]["content"] == "final-plus"
   end
 
   test "开启 trace 前缀后会携带 request_id/run_id" do

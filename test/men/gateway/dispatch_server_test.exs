@@ -1,7 +1,7 @@
 defmodule Men.Gateway.DispatchServerTest do
   use ExUnit.Case, async: false
 
-  alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
+  alias Men.Channels.Egress.Messages.{ErrorMessage, EventMessage, FinalMessage}
   alias Men.Gateway.DispatchServer
   alias Men.Gateway.SessionCoordinator
 
@@ -51,6 +51,10 @@ defmodule Men.Gateway.DispatchServerTest do
           Process.sleep(200)
           ok_payload(prompt, context)
 
+        prompt == "stream_delta" ->
+          emit_delta(context, "partial:stream_delta")
+          ok_payload(prompt, context)
+
         true ->
           ok_payload(prompt, context)
       end
@@ -69,6 +73,12 @@ defmodule Men.Gateway.DispatchServerTest do
         send(pid, message)
       end
 
+      :ok
+    end
+
+    defp emit_delta(context, text) do
+      callback = Map.get(context, :event_callback)
+      if is_function(callback, 1), do: callback.(%{type: :delta, payload: %{text: text}})
       :ok
     end
   end
@@ -443,6 +453,40 @@ defmodule Men.Gateway.DispatchServerTest do
     assert_receive {:bridge_called, "slow", %{request_id: "req-async-1"}}, 1_000
     assert_receive {:egress_called, "feishu:u-async", %FinalMessage{} = message}, 1_000
     assert message.content == "ok:slow"
+  end
+
+  test "streaming_enabled 打开时会透传 delta 事件" do
+    server = start_dispatch_server(streaming_enabled: true)
+
+    event = %{
+      request_id: "req-stream-1",
+      run_id: "run-stream-1",
+      payload: "stream_delta",
+      channel: "feishu",
+      user_id: "u-stream"
+    }
+
+    assert {:ok, result} = DispatchServer.dispatch(server, event)
+    assert result.run_id == "run-stream-1"
+
+    assert_receive {:egress_called, "feishu:u-stream", %EventMessage{} = event_message}
+    assert event_message.event_type == :delta
+    assert event_message.payload == %{text: "partial:stream_delta"}
+    assert event_message.metadata.run_id == "run-stream-1"
+
+    assert_receive {:egress_called, "feishu:u-stream", %FinalMessage{} = final_message}
+    assert final_message.content == "ok:stream_delta"
+  end
+
+  test "接收到非关键 session_event 时兜底吞掉，不影响进程存活" do
+    server = start_dispatch_server()
+
+    send(server, {:session_event, %{type: "lifecycle.received", session_id: "session-x", seq: 1}})
+    Process.sleep(20)
+
+    assert Process.alive?(server)
+    refute_receive {:egress_called, _, _}
+    refute_receive {:bridge_called, _, _}
   end
 
   test "关键边界输入: 非法 request_id / metadata 非 map / 路由字段不足" do
