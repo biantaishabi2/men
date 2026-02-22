@@ -1,0 +1,194 @@
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                           Men Gateway Architecture                             │
+└────────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 1: HTTP 入口 (MenWeb.Endpoint)                                            │
+│ ┌──────────────────────────────────────────────────────────────────────────┐   │
+│ │ POST /webhooks/dingtalk    →  DingtalkController.callback()              │   │
+│ │ POST /webhooks/feishu      →  FeishuController.create()                  │   │
+│ │                                                                            │   │
+│ │ Plugs: CacheBodyReader (缓存原始 body 用于签名验证)                        │   │
+│ └──────────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                       ↓
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 2: 入站验证 (Ingress Adapters)                                            │
+│ ┌──────────────────────┐                         ┌──────────────────────┐      │
+│ │ DingtalkIngress      │                         │ FeishuIngress        │      │
+│ │ ─────────────────    │                         │ ──────────────────   │      │
+│ │ ✓ verify_signature   │                         │ ✓ verify_signature   │      │
+│ │  (HMAC-SHA256)       │                         │  (SHA256)            │      │
+│ │ ✓ timestamp_window   │                         │ ✓ timestamp_window   │      │
+│ │  (300s)              │                         │  (300s|900s)         │      │
+│ │ ✓ normalize()        │                         │ ✓ replay_detection   │      │
+│ │  → inbound_event     │                         │  (ETS nonce table)   │      │
+│ │                      │                         │ ✓ normalize()        │      │
+│ └──────────────────────┘                         │  → inbound_event     │      │
+│ Input: {headers, body}                           └──────────────────────┘      │
+│ Output: {:ok, inbound_event} | {:error, ...}                                   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                       ↓
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 3: Gateway 主调度 (Men.Gateway.DispatchServer - GenServer L1 状态机)     │
+│ ┌──────────────────────────────────────────────────────────────────────────┐   │
+│ │ dispatch/1 收到 inbound_event                                             │   │
+│ │                                                                            │   │
+│ │ 1. normalize_event()  → 检查 request_id, payload 完整性                  │   │
+│ │ 2. ensure_not_duplicate()  → MapSet.member?(run_id)                      │   │
+│ │ 3. do_start_turn()  ─────→ bridge_adapter.start_turn(prompt, context)    │   │
+│ │ 4. do_send_final()  ─────→ egress_adapter.send(session_key, message)     │   │
+│ │ 5. mark_processed()  → MapSet.put(run_id)  [unless egress error]         │   │
+│ │                                                                            │   │
+│ │ State:                                                                     │   │
+│ │  - processed_run_ids: MapSet<run_id>                                      │   │
+│ │  - session_last_context: Map<session_key, run_context>                    │   │
+│ │  - bridge_adapter, egress_adapter (injected)                              │   │
+│ └──────────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                       ↓
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 4: 运行时桥接 (Men.RuntimeBridge.GongCLI)                                │
+│ ┌──────────────────────────────────────────────────────────────────────────┐   │
+│ │ start_turn(prompt, context)                                              │   │
+│ │                                                                            │   │
+│ │ 1. acquire_slot()  → ETS 并发计数  (max=10, 超过返回 overloaded)        │   │
+│ │ 2. Port.open({:spawn_executable, "gong"}, args)  → 启动子进程             │   │
+│ │    Args: --prompt <json> --request-id <id> --session-key <key>           │   │
+│ │ 3. await_port_result()  → 循环接收数据                                    │   │
+│ │    a) 收到 stdout/stderr → 累积到 output                                  │   │
+│ │    b) 收到 {:exit_status, code}  → 成功/失败                             │   │
+│ │    c) 超时后 (30s)  → cleanup_timed_out_port()                           │   │
+│ │       - Port.close(port)                                                  │   │
+│ │       - pkill -P <os_pid> -TERM  (终止子进程)                             │   │
+│ │       - kill -TERM/-KILL <os_pid>                                         │   │
+│ │ 4. release_slot()  → ETS 减1                                              │   │
+│ │                                                                            │   │
+│ │ Return:                                                                    │   │
+│ │  {:ok, {text, meta}}  | {:error, error_payload}  | {:timeout, ...}       │   │
+│ └──────────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                       ↓
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 5: 出站适配 (Egress Adapters)                                            │
+│ ┌──────────────────────┐                         ┌──────────────────────┐      │
+│ │ DingtalkEgress       │                         │ FeishuEgress         │      │
+│ │ ─────────────────    │                         │ ──────────────────   │      │
+│ │ send(session_key,    │                         │ send(session_key,    │      │
+│ │      FinalMessage)   │                         │      FinalMessage)   │      │
+│ │   or ErrorMessage    │                         │   or ErrorMessage    │      │
+│ │                      │                         │                      │      │
+│ │ to_webhook_response( │                         │ to_webhook_response( │      │
+│ │   {:ok, result}      │                         │   {:ok, result}      │      │
+│ │   or {:error, err}   │                         │   or {:error, err}   │      │
+│ │ )                    │                         │ )                    │      │
+│ │                      │                         │                      │      │
+│ │ Returns:             │                         │ Returns:             │      │
+│ │ {200, body_json}     │                         │ {200, body_json}     │      │
+│ └──────────────────────┘                         └──────────────────────┘      │
+│                                                                                 │
+│ Message Structure:                                                              │
+│ %FinalMessage{                                                                 │
+│   session_key: "dingtalk:user_123",                                            │
+│   content: "Generated text...",                                                │
+│   metadata: {...}                                                              │
+│ }                                                                               │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                       ↓
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│ Layer 6: HTTP 响应                                                              │
+│                                                                                 │
+│ {200, %{                                                                        │
+│   "status": "final",                                                            │
+│   "code": "OK",                                                                 │
+│   "message": "Generated text...",                                               │
+│   "request_id": "req_xxx",                                                      │
+│   "run_id": "run_xxx",                                                          │
+│   "details": {...}                                                              │
+│ }}                                                                              │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+
+Error Handling Decision Tree
+═════════════════════════════════════════════════════════════════════════════════
+
+                         DispatchServer.dispatch(event)
+                                  ↓
+                         ┌────────────────┐
+                         │ normalize_event │ ← 检查 request_id, payload
+                         └────────────────┘
+                             ✓ / ✗
+                            /   \
+                          ✓/     \✗ → {:error, INVALID_EVENT}
+                          /       \
+                   normalize_event/ is_duplicate?
+                        ✓          ✓ / ✗
+                       /          /   \
+                      /        ✓/     \✗
+                     /     (duplicate) \
+                    /          :ok      \
+           start_turn()                 /
+              ✓ / ✗                    /
+              /   \                   /
+            ✓/     \✗ ────────────→ bridge_error
+           /         \
+       get result  send_error()  egress_error
+           |           |              |
+           send_final()→ mark_processed ✗
+           |
+          ✓/✗
+         /   \
+       ✓/     \✗
+      /       \
+    mark     NO mark (允许重试)
+    processed  └─ EGRESS_ERROR → 返回 error，NOT 标记已处理
+
+
+配置注入示例
+═════════════════════════════════════════════════════════════════════════════════
+
+# config/config.exs
+
+config :men, Men.Gateway.DispatchServer,
+  bridge_adapter: Men.RuntimeBridge.GongCLI,      # 可替换为其他 bridge
+  egress_adapter: Men.Channels.Egress.DingtalkAdapter  # 可替换为 Feishu/Slack
+
+config :men, Men.RuntimeBridge.GongCLI,
+  command: "gong",                 # 可配置为绝对路径
+  timeout_ms: 30_000,              # 最大执行时间
+  max_concurrency: 10,             # 最大并发执行数
+  backpressure_strategy: :reject   # 超限时拒绝
+
+config :men, Men.Channels.Ingress.DingtalkAdapter,
+  secret: {:system, "DINGTALK_WEBHOOK_SECRET"}
+
+config :men, Men.Channels.Ingress.FeishuAdapter,
+  bots: %{
+    "bot_id_1" => "secret_1",
+    "bot_id_2" => "secret_2"
+  }
+
+
+可观测性：全链路追踪 ID
+═════════════════════════════════════════════════════════════════════════════════
+
+inbound_event:
+  request_id: "req_abc123"         ← 来自 webhook header (或生成)
+  session_key: "dingtalk:user_123" ← 由 channel + user_id 构成
+  run_id: "run_xyz789"             ← 由 dispatch 生成或传入
+
+执行链路：
+  request_id  ─ 追踪单次 HTTP 请求
+  session_key ─ 追踪对话会话（跨多轮）
+  run_id      ─ 追踪单次执行（支持幂等重试）
+
+日志：
+  Logger.info("runtime_bridge.gong_cli.start_turn",
+    request_id: "req_abc123",
+    session_key: "dingtalk:user_123",
+    run_id: "run_xyz789",
+    duration_ms: 234,
+    exit_code: 0,
+    timeout: false,
+    result: :ok
+  )

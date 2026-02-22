@@ -21,3 +21,7 @@ Ready to run in production? Please [check our deployment guides](https://hexdocs
 
 - 验证时间: 2026-02-21
 - 目的: 验证 PR 合并后会触发 orchestrate control run
+
+## DingTalk Stream
+
+- Stream sidecar 文档：`docs/dingtalk-stream-worker.md`
