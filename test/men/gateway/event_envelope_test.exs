@@ -42,6 +42,24 @@ defmodule Men.Gateway.EventEnvelopeTest do
              EventEnvelope.normalize(%{type: "heartbeat", event_id: "E2", version: 1, meta: "bad"})
   end
 
+  test "normalize 在非字符串化 key 场景返回结构化错误而非抛异常" do
+    assert {:error, {:invalid_field, :key}} =
+             EventEnvelope.normalize(%{
+               {:tuple, :key} => "bad",
+               type: "heartbeat",
+               event_id: "E4",
+               version: 1
+             })
+
+    assert {:error, {:invalid_field, :key}} =
+             EventEnvelope.normalize(%{
+               %{} => "bad",
+               type: "heartbeat",
+               event_id: "E5",
+               version: 1
+             })
+  end
+
   test "from_map 支持 struct 输入并保持规范化" do
     assert {:ok, original} =
              EventEnvelope.normalize(%{

@@ -48,9 +48,8 @@ defmodule Men.Gateway.EventEnvelope do
 
   @spec from_map(map()) :: {:ok, t()} | {:error, term()}
   def from_map(%{} = attrs) do
-    normalized = stringify_keys(attrs)
-
-    with {:ok, type} <- fetch_required_text(normalized, "type"),
+    with {:ok, normalized} <- stringify_keys(attrs),
+         {:ok, type} <- fetch_required_text(normalized, "type"),
          {:ok, source} <- fetch_text(normalized, "source", "unknown"),
          {:ok, target} <- fetch_text(normalized, "target", "unknown"),
          {:ok, event_id} <- fetch_required_text(normalized, "event_id"),
@@ -94,17 +93,22 @@ defmodule Men.Gateway.EventEnvelope do
   def normalize(_), do: {:error, :invalid_event_envelope}
 
   defp stringify_keys(map) do
-    Enum.reduce(map, %{}, fn {key, value}, acc ->
-      normalized_key =
-        case key do
-          k when is_atom(k) -> Atom.to_string(k)
-          k when is_binary(k) -> k
-          _ -> to_string(key)
-        end
+    Enum.reduce_while(map, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
+      case normalize_key(key) do
+        {:ok, normalized_key} ->
+          {:cont, {:ok, Map.put(acc, normalized_key, value)}}
 
-      Map.put(acc, normalized_key, value)
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
     end)
   end
+
+  defp normalize_key(key) when is_atom(key), do: {:ok, Atom.to_string(key)}
+  defp normalize_key(key) when is_binary(key), do: {:ok, key}
+  defp normalize_key(key) when is_integer(key), do: {:ok, Integer.to_string(key)}
+  defp normalize_key(key) when is_float(key), do: {:ok, :erlang.float_to_binary(key)}
+  defp normalize_key(_), do: {:error, {:invalid_field, :key}}
 
   defp fetch_required_text(map, key) do
     case Map.get(map, key) do
