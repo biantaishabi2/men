@@ -3,6 +3,7 @@ defmodule Men.Gateway.DispatchServerTest do
 
   alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
   alias Men.Gateway.DispatchServer
+  alias Men.Gateway.SessionCoordinator
 
   defmodule MockBridge do
     @behaviour Men.RuntimeBridge.Bridge
@@ -12,6 +13,22 @@ defmodule Men.Gateway.DispatchServerTest do
       notify({:bridge_called, prompt, context})
 
       cond do
+        prompt == "session_not_found_once" ->
+          attempt = Process.get({:bridge_attempt, context.run_id}, 0) + 1
+          Process.put({:bridge_attempt, context.run_id}, attempt)
+
+          if attempt == 1 do
+            {:error,
+             %{
+               type: :failed,
+               code: "session_not_found",
+               message: "runtime session missing",
+               details: %{source: :mock}
+             }}
+          else
+            ok_payload(prompt, context)
+          end
+
         prompt == "runtime_session_not_found" ->
           {:error,
            %{
@@ -32,20 +49,19 @@ defmodule Men.Gateway.DispatchServerTest do
 
         prompt == "slow" ->
           Process.sleep(200)
-
-          {:ok,
-           %{
-             text: "ok:" <> prompt,
-             meta: %{source: :mock, echoed_run_id: context.run_id}
-           }}
+          ok_payload(prompt, context)
 
         true ->
-          {:ok,
-           %{
-             text: "ok:" <> prompt,
-             meta: %{source: :mock, echoed_run_id: context.run_id}
-           }}
+          ok_payload(prompt, context)
       end
+    end
+
+    defp ok_payload(prompt, context) do
+      {:ok,
+       %{
+         text: "ok:" <> prompt,
+         meta: %{source: :mock, echoed_run_id: context.run_id}
+       }}
     end
 
     defp notify(message) do
@@ -118,8 +134,28 @@ defmodule Men.Gateway.DispatchServerTest do
     )
   end
 
-  defp start_transient_coordinator(mode) do
+  defp start_session_coordinator(opts \\ []) do
     name = {:global, {__MODULE__, :coordinator, self(), make_ref()}}
+
+    start_supervised!(
+      {SessionCoordinator,
+       Keyword.merge(
+         [
+           name: name,
+           ttl_ms: 300_000,
+           gc_interval_ms: 60_000,
+           max_entries: 10_000,
+           invalidation_codes: [:runtime_session_not_found, :session_not_found]
+         ],
+         opts
+       )}
+    )
+
+    name
+  end
+
+  defp start_transient_coordinator(mode) do
+    name = {:global, {__MODULE__, :transient_coordinator, self(), make_ref()}}
     pid = spawn(fn -> transient_coordinator_loop(mode) end)
     :yes = :global.register_name(name, pid)
 
@@ -131,24 +167,24 @@ defmodule Men.Gateway.DispatchServerTest do
     name
   end
 
-  defp transient_coordinator_loop(:crash_on_get_or_create) do
+  defp transient_coordinator_loop(:crash_on_get_or_create_session) do
     receive do
-      {:"$gen_call", _from, {:get_or_create, _session_key, _create_fun}} ->
+      {:"$gen_call", _from, {:get_or_create_session, _session_key}} ->
         exit(:coordinator_restarting)
     end
   end
 
-  defp transient_coordinator_loop(:crash_on_invalidate) do
+  defp transient_coordinator_loop(:crash_on_rebuild_session) do
     receive do
-      {:"$gen_call", from, {:get_or_create, _session_key, create_fun}} ->
-        GenServer.reply(from, {:ok, create_fun.()})
-        transient_coordinator_loop(:wait_invalidate)
+      {:"$gen_call", from, {:get_or_create_session, _session_key}} ->
+        GenServer.reply(from, {:ok, "runtime-session-transient"})
+        transient_coordinator_loop(:wait_rebuild)
     end
   end
 
-  defp transient_coordinator_loop(:wait_invalidate) do
+  defp transient_coordinator_loop(:wait_rebuild) do
     receive do
-      {:"$gen_call", _from, {:invalidate_by_session_key, _reason}} ->
+      {:"$gen_call", _from, {:rebuild_session, _session_key}} ->
         exit(:coordinator_restarting)
     end
   end
@@ -180,93 +216,17 @@ defmodule Men.Gateway.DispatchServerTest do
     assert message.metadata.run_id == result.run_id
   end
 
-  test "bridge error: 触发 error egress 并返回 error_result" do
-    server = start_dispatch_server()
+  test "同 key 连续消息复用 runtime_session_id" do
+    coordinator_name = start_session_coordinator()
 
-    event = %{
-      request_id: "req-2",
-      payload: "bridge_error",
-      channel: "feishu",
-      user_id: "u200"
-    }
-
-    assert {:error, error_result} = DispatchServer.dispatch(server, event)
-    assert error_result.code == "BRIDGE_FAIL"
-    assert error_result.reason == "runtime bridge failed"
-    assert error_result.session_key == "feishu:u200"
-
-    assert_receive {:egress_called, "feishu:u200", %ErrorMessage{} = message}
-    assert message.code == "BRIDGE_FAIL"
-    assert message.reason == "runtime bridge failed"
-  end
-
-  test "error egress 失败: 调用方可感知 EGRESS_ERROR" do
-    Application.put_env(:men, :dispatch_server_test_fail_error_egress, :error_channel_unavailable)
-
-    server = start_dispatch_server()
-
-    event = %{
-      request_id: "req-2b",
-      payload: "bridge_error",
-      channel: "feishu",
-      user_id: "u201"
-    }
-
-    assert {:error, error_result} = DispatchServer.dispatch(server, event)
-    assert error_result.code == "EGRESS_ERROR"
-    assert error_result.reason == "egress send failed"
-
-    assert_receive {:egress_called, "feishu:u201", %ErrorMessage{} = message}
-    assert message.code == "BRIDGE_FAIL"
-  end
-
-  test "重复 run_id: 返回 duplicate 且不重复 egress" do
-    server = start_dispatch_server()
-
-    event = %{
-      request_id: "req-3",
-      run_id: "fixed-run-id",
-      payload: "hello",
-      channel: "feishu",
-      user_id: "u300"
-    }
-
-    assert {:ok, _result} = DispatchServer.dispatch(server, event)
-    assert_receive {:egress_called, "feishu:u300", %FinalMessage{}}
-
-    assert {:ok, :duplicate} = DispatchServer.dispatch(server, event)
-    refute_receive {:egress_called, "feishu:u300", %FinalMessage{}}
-    refute_receive {:egress_called, "feishu:u300", %ErrorMessage{}}
-  end
-
-  test "egress 失败返回 EGRESS_ERROR 时不标记 processed，可同 run_id 重试" do
-    Application.put_env(:men, :dispatch_server_test_fail_final_egress, :downstream_unavailable)
-
-    server = start_dispatch_server()
-
-    event = %{
-      request_id: "req-3b",
-      run_id: "retryable-run-id",
-      payload: "hello",
-      channel: "feishu",
-      user_id: "u301"
-    }
-
-    assert {:error, error_result} = DispatchServer.dispatch(server, event)
-    assert error_result.code == "EGRESS_ERROR"
-
-    Application.delete_env(:men, :dispatch_server_test_fail_final_egress)
-
-    assert {:ok, result} = DispatchServer.dispatch(server, event)
-    assert result.run_id == "retryable-run-id"
-    assert {:ok, :duplicate} = DispatchServer.dispatch(server, event)
-  end
-
-  test "同 session 连续消息: session_key 一致且可连续处理" do
-    server = start_dispatch_server()
+    server =
+      start_dispatch_server(
+        session_coordinator_enabled: true,
+        session_coordinator_name: coordinator_name
+      )
 
     event1 = %{
-      request_id: "req-4-1",
+      request_id: "req-reuse-1",
       payload: "turn-1",
       channel: "feishu",
       user_id: "u400",
@@ -274,7 +234,7 @@ defmodule Men.Gateway.DispatchServerTest do
     }
 
     event2 = %{
-      request_id: "req-4-2",
+      request_id: "req-reuse-2",
       payload: "turn-2",
       channel: "feishu",
       user_id: "u400",
@@ -287,15 +247,121 @@ defmodule Men.Gateway.DispatchServerTest do
     assert result1.session_key == "feishu:u400:t:t01"
     assert result2.session_key == "feishu:u400:t:t01"
 
-    assert_receive {:bridge_called, "turn-1", %{session_key: "feishu:u400:t:t01"}}
-    assert_receive {:bridge_called, "turn-2", %{session_key: "feishu:u400:t:t01"}}
+    assert_receive {:bridge_called, "turn-1", %{session_key: runtime_session_id_1, external_session_key: "feishu:u400:t:t01"}}
+    assert_receive {:bridge_called, "turn-2", %{session_key: runtime_session_id_2, external_session_key: "feishu:u400:t:t01"}}
+    assert runtime_session_id_1 == runtime_session_id_2
   end
 
-  test "同 run_id 并发提交: 只处理一次，其余命中 duplicate" do
+  test "session_not_found 仅重建一次并重试一次成功" do
+    coordinator_name = start_session_coordinator()
+
+    server =
+      start_dispatch_server(
+        session_coordinator_enabled: true,
+        session_coordinator_name: coordinator_name
+      )
+
+    event = %{
+      request_id: "req-heal-1",
+      run_id: "run-heal-1",
+      payload: "session_not_found_once",
+      channel: "feishu",
+      user_id: "u-heal"
+    }
+
+    assert {:ok, result} = DispatchServer.dispatch(server, event)
+    assert result.run_id == "run-heal-1"
+
+    assert_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1", session_key: runtime_session_id_1}}
+    assert_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1", session_key: runtime_session_id_2}}
+    assert runtime_session_id_1 != runtime_session_id_2
+
+    assert_receive {:egress_called, "feishu:u-heal", %FinalMessage{}}
+    refute_receive {:egress_called, "feishu:u-heal", %FinalMessage{}}
+    refute_receive {:egress_called, "feishu:u-heal", %ErrorMessage{}}
+  end
+
+  test "非 session_not_found 错误不重试" do
+    coordinator_name = start_session_coordinator()
+
+    server =
+      start_dispatch_server(
+        session_coordinator_enabled: true,
+        session_coordinator_name: coordinator_name
+      )
+
+    event = %{
+      request_id: "req-no-retry-1",
+      run_id: "run-no-retry-1",
+      payload: "bridge_error",
+      channel: "feishu",
+      user_id: "u-no-retry"
+    }
+
+    assert {:error, error_result} = DispatchServer.dispatch(server, event)
+    assert error_result.code == "BRIDGE_FAIL"
+    assert_receive {:bridge_called, "bridge_error", %{run_id: "run-no-retry-1"}}
+    refute_receive {:bridge_called, "bridge_error", %{run_id: "run-no-retry-1"}}
+
+    assert_receive {:egress_called, "feishu:u-no-retry", %ErrorMessage{} = message}
+    assert message.code == "BRIDGE_FAIL"
+  end
+
+  test "run_id 幂等命中终态缓存且不重复出站" do
     server = start_dispatch_server()
 
     event = %{
-      request_id: "req-5",
+      request_id: "req-idempotent-1",
+      run_id: "fixed-run-id",
+      payload: "hello",
+      channel: "feishu",
+      user_id: "u300"
+    }
+
+    assert {:ok, first_result} = DispatchServer.dispatch(server, event)
+    assert_receive {:bridge_called, "hello", %{run_id: "fixed-run-id"}}
+    assert_receive {:egress_called, "feishu:u300", %FinalMessage{}}
+
+    assert {:ok, second_result} = DispatchServer.dispatch(server, event)
+    assert second_result == first_result
+    refute_receive {:bridge_called, "hello", %{run_id: "fixed-run-id"}}
+    refute_receive {:egress_called, "feishu:u300", %FinalMessage{}}
+    refute_receive {:egress_called, "feishu:u300", %ErrorMessage{}}
+  end
+
+  test "egress 失败返回 EGRESS_ERROR 时不缓存终态，可同 run_id 恢复重试" do
+    Application.put_env(:men, :dispatch_server_test_fail_final_egress, :downstream_unavailable)
+
+    server = start_dispatch_server()
+
+    event = %{
+      request_id: "req-egress-fail-1",
+      run_id: "retryable-run-id",
+      payload: "hello",
+      channel: "feishu",
+      user_id: "u301"
+    }
+
+    assert {:error, error_result} = DispatchServer.dispatch(server, event)
+    assert error_result.code == "EGRESS_ERROR"
+    assert_receive {:bridge_called, "hello", %{run_id: "retryable-run-id"}}
+
+    Application.delete_env(:men, :dispatch_server_test_fail_final_egress)
+
+    assert {:ok, result} = DispatchServer.dispatch(server, event)
+    assert result.run_id == "retryable-run-id"
+    assert_receive {:bridge_called, "hello", %{run_id: "retryable-run-id"}}
+
+    assert {:ok, result_cached} = DispatchServer.dispatch(server, event)
+    assert result_cached == result
+    refute_receive {:bridge_called, "hello", %{run_id: "retryable-run-id"}}
+  end
+
+  test "同 run_id 并发提交: 只执行一次 runtime 与一次 egress" do
+    server = start_dispatch_server()
+
+    event = %{
+      request_id: "req-concurrent-1",
       run_id: "concurrent-run-id",
       payload: "hello",
       channel: "feishu",
@@ -308,13 +374,10 @@ defmodule Men.Gateway.DispatchServerTest do
       end
 
     results = Enum.map(tasks, &Task.await(&1, 2_000))
+    assert Enum.uniq(results) |> length() == 1
 
-    assert Enum.count(results, &match?({:ok, :duplicate}, &1)) == 1
-
-    assert Enum.count(results, fn
-             {:ok, %{run_id: "concurrent-run-id"}} -> true
-             _ -> false
-           end) == 1
+    assert_receive {:bridge_called, "hello", %{run_id: "concurrent-run-id"}}
+    refute_receive {:bridge_called, "hello", %{run_id: "concurrent-run-id"}}
 
     assert_receive {:egress_called, "feishu:u500", %FinalMessage{}}
     refute_receive {:egress_called, "feishu:u500", %FinalMessage{}}
@@ -369,8 +432,8 @@ defmodule Men.Gateway.DispatchServerTest do
     refute_receive {:bridge_called, _, _}
   end
 
-  test "session coordinator 在 get_or_create 调用窗口退出时回退到原始 session_key" do
-    coordinator_name = start_transient_coordinator(:crash_on_get_or_create)
+  test "session coordinator 在 get_or_create_session 调用窗口退出时回退到原始 session_key" do
+    coordinator_name = start_transient_coordinator(:crash_on_get_or_create_session)
 
     server =
       start_dispatch_server(
@@ -390,8 +453,8 @@ defmodule Men.Gateway.DispatchServerTest do
     assert_receive {:bridge_called, "hello", %{session_key: "feishu:u-race-1"}}
   end
 
-  test "session coordinator 在 invalidate 调用窗口退出时不影响错误返回" do
-    coordinator_name = start_transient_coordinator(:crash_on_invalidate)
+  test "session coordinator 在 rebuild 调用窗口退出时保持单次失败语义" do
+    coordinator_name = start_transient_coordinator(:crash_on_rebuild_session)
 
     server =
       start_dispatch_server(
@@ -401,14 +464,14 @@ defmodule Men.Gateway.DispatchServerTest do
 
     event = %{
       request_id: "req-coord-race-2",
-      payload: "runtime_session_not_found",
+      payload: "session_not_found_once",
       channel: "feishu",
       user_id: "u-race-2"
     }
 
     assert {:error, error_result} = DispatchServer.dispatch(server, event)
-    assert error_result.code == "runtime_session_not_found"
+    assert error_result.code == "session_not_found"
     assert error_result.reason == "runtime session missing"
-    assert_receive {:egress_called, "feishu:u-race-2", %ErrorMessage{code: "runtime_session_not_found"}}
+    assert_receive {:egress_called, "feishu:u-race-2", %ErrorMessage{code: "session_not_found"}}
   end
 end
