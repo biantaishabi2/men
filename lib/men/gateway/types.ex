@@ -23,14 +23,13 @@ defmodule Men.Gateway.Types do
         }
 
   @typedoc """
-  单次运行上下文。
+  单次运行上下文（最小归属信息）。
   """
   @type run_context :: %{
-          required(:session_key) => binary(),
           required(:run_id) => binary(),
-          required(:request_id) => binary(),
-          required(:payload) => term(),
-          required(:metadata) => map()
+          required(:session_key) => binary(),
+          required(:runtime_session_id) => binary(),
+          required(:attempt) => pos_integer()
         }
 
   @typedoc """

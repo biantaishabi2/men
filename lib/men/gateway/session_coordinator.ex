@@ -43,6 +43,26 @@ defmodule Men.Gateway.SessionCoordinator do
     GenServer.call(server, {:get_or_create, session_key, create_fun})
   end
 
+  @spec get_or_create_session(binary()) :: {:ok, binary()} | {:error, term()}
+  def get_or_create_session(session_key) when is_binary(session_key) do
+    get_or_create_session(__MODULE__, session_key)
+  end
+
+  @spec get_or_create_session(GenServer.server(), binary()) :: {:ok, binary()} | {:error, term()}
+  def get_or_create_session(server, session_key) when is_binary(session_key) do
+    GenServer.call(server, {:get_or_create_session, session_key})
+  end
+
+  @spec rebuild_session(binary()) :: {:ok, binary()} | {:error, term()}
+  def rebuild_session(session_key) when is_binary(session_key) do
+    rebuild_session(__MODULE__, session_key)
+  end
+
+  @spec rebuild_session(GenServer.server(), binary()) :: {:ok, binary()} | {:error, term()}
+  def rebuild_session(server, session_key) when is_binary(session_key) do
+    GenServer.call(server, {:rebuild_session, session_key})
+  end
+
   @spec invalidate_by_session_key(invalidation_reason()) :: :ok | :ignored | :not_found
   def invalidate_by_session_key(reason), do: invalidate_by_session_key(__MODULE__, reason)
 
@@ -89,21 +109,27 @@ defmodule Men.Gateway.SessionCoordinator do
 
   @impl true
   def handle_call({:get_or_create, session_key, create_fun}, _from, state) do
+    resolve_or_create_runtime_session(state, session_key, create_fun)
+  end
+
+  @impl true
+  def handle_call({:get_or_create_session, session_key}, _from, state) do
+    resolve_or_create_runtime_session(state, session_key, &generate_runtime_session_id/0)
+  end
+
+  @impl true
+  def handle_call({:rebuild_session, session_key}, _from, state) do
     now_ms = now_ms()
 
     case lookup_entry(state, session_key) do
       {:ok, entry} ->
-        if expired?(entry, now_ms) do
-          delete_entry(state, entry)
-          create_and_store(state, session_key, create_fun, now_ms)
-        else
-          refreshed = refresh_entry(state, entry, now_ms)
-          {:reply, {:ok, refreshed.runtime_session_id}, state}
-        end
+        delete_entry(state, entry)
 
       :not_found ->
-        create_and_store(state, session_key, create_fun, now_ms)
+        :ok
     end
+
+    create_and_store(state, session_key, &generate_runtime_session_id/0, now_ms)
   end
 
   @impl true
@@ -196,6 +222,24 @@ defmodule Men.Gateway.SessionCoordinator do
 
       invalid ->
         {:reply, {:error, {:invalid_runtime_session_id, invalid}}, state}
+    end
+  end
+
+  defp resolve_or_create_runtime_session(state, session_key, create_fun) do
+    now_ms = now_ms()
+
+    case lookup_entry(state, session_key) do
+      {:ok, entry} ->
+        if expired?(entry, now_ms) do
+          delete_entry(state, entry)
+          create_and_store(state, session_key, create_fun, now_ms)
+        else
+          refreshed = refresh_entry(state, entry, now_ms)
+          {:reply, {:ok, refreshed.runtime_session_id}, state}
+        end
+
+      :not_found ->
+        create_and_store(state, session_key, create_fun, now_ms)
     end
   end
 
@@ -366,6 +410,11 @@ defmodule Men.Gateway.SessionCoordinator do
   defp positive_integer(opts, config, key, default) do
     value = Keyword.get(opts, key, Keyword.get(config, key, default))
     if is_integer(value) and value > 0, do: value, else: default
+  end
+
+  # 统一由协调器生成 runtime session id，保证重建语义原子化。
+  defp generate_runtime_session_id do
+    "runtime-session-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
   end
 
   defp schedule_gc(interval_ms), do: Process.send_after(self(), :gc, interval_ms)
