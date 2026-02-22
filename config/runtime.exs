@@ -103,7 +103,7 @@ config :men, Men.RuntimeBridge.GongRPC,
   model: System.get_env("GONG_RPC_MODEL") || "deepseek:deepseek-chat"
 
 config :men, Men.RuntimeBridge.ZcpgRPC,
-  base_url: System.get_env("ZCPG_RPC_BASE_URL") || "http://127.0.0.1:8080",
+  base_url: System.get_env("ZCPG_RPC_BASE_URL") || "http://127.0.0.1:4015",
   path: System.get_env("ZCPG_RPC_PATH") || "/v1/runtime/bridge/prompt",
   token: System.get_env("ZCPG_RPC_TOKEN"),
   timeout: parse_positive_integer_env.("ZCPG_RPC_TIMEOUT_MS", 30_000)

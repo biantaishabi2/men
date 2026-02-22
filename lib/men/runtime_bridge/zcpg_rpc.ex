@@ -8,7 +8,7 @@ defmodule Men.RuntimeBridge.ZcpgRPC do
   alias Men.RuntimeBridge.{Error, Request, Response}
 
   @default_runtime_id "zcpg_rpc"
-  @default_base_url "http://127.0.0.1:8080"
+  @default_base_url "http://127.0.0.1:4015"
   @default_path "/v1/runtime/bridge/prompt"
   @default_timeout_ms 30_000
 
