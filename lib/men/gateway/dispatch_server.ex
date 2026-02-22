@@ -4,27 +4,22 @@ defmodule Men.Gateway.DispatchServer do
   """
 
   use GenServer
-
   require Logger
 
-  alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
+  alias Men.Channels.Egress.Messages.{ErrorMessage, EventMessage, FinalMessage}
   alias Men.Gateway.SessionCoordinator
   alias Men.Gateway.Types
   alias Men.Routing.SessionKey
-
-  @type terminal_reply :: {:ok, Types.dispatch_result()} | {:error, Types.error_result()}
 
   @type state :: %{
           bridge_adapter: module(),
           egress_adapter: module(),
           storage_adapter: term(),
+          streaming_enabled: boolean(),
           session_coordinator_enabled: boolean(),
           session_coordinator_name: GenServer.server(),
-          session_rebuild_retry_enabled: boolean(),
-          run_terminal_limit: pos_integer(),
-          run_terminal_order: :queue.queue(binary()),
-          session_last_context: %{optional(binary()) => Types.run_context()},
-          run_terminal_results: %{optional(binary()) => terminal_reply()}
+          processed_run_ids: MapSet.t(binary()),
+          session_last_context: %{optional(binary()) => Types.run_context()}
         }
 
   defmodule NoopEgress do
@@ -45,7 +40,7 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   @spec dispatch(GenServer.server(), Types.inbound_event()) ::
-          {:ok, Types.dispatch_result()} | {:error, Types.error_result()}
+          {:ok, Types.dispatch_result() | :duplicate} | {:error, Types.error_result()}
   def dispatch(server \\ __MODULE__, inbound_event) do
     GenServer.call(server, {:dispatch, inbound_event})
   end
@@ -73,6 +68,16 @@ defmodule Men.Gateway.DispatchServer do
       egress_adapter: Keyword.get(opts, :egress_adapter, Keyword.fetch!(config, :egress_adapter)),
       storage_adapter:
         Keyword.get(opts, :storage_adapter, Keyword.get(config, :storage_adapter, :memory)),
+      streaming_enabled:
+        Keyword.get(
+          opts,
+          :streaming_enabled,
+          Keyword.get(
+            config,
+            :streaming_enabled,
+            Keyword.get(config, :chat_streaming_enabled, false)
+          )
+        ),
       session_coordinator_enabled:
         Keyword.get(
           opts,
@@ -80,17 +85,8 @@ defmodule Men.Gateway.DispatchServer do
           Keyword.get(coordinator_config, :enabled, true)
         ),
       session_coordinator_name: Keyword.get(opts, :session_coordinator_name, SessionCoordinator),
-      session_rebuild_retry_enabled:
-        Keyword.get(
-          opts,
-          :session_rebuild_retry_enabled,
-          Keyword.get(config, :session_rebuild_retry_enabled, true)
-        ),
-      run_terminal_limit:
-        Keyword.get(opts, :run_terminal_limit, Keyword.get(config, :run_terminal_limit, 1_000)),
-      run_terminal_order: :queue.new(),
-      session_last_context: %{},
-      run_terminal_results: %{}
+      processed_run_ids: MapSet.new(),
+      session_last_context: %{}
     }
 
     {:ok, state}
@@ -108,17 +104,82 @@ defmodule Men.Gateway.DispatchServer do
     {:noreply, new_state}
   end
 
-  defp run_dispatch(state, inbound_event) do
-    with {:ok, context} <- normalize_event(inbound_event) do
-      case fetch_terminal_result(state, context.run_id) do
-        {:ok, cached_reply} ->
-          {cached_reply, state}
+  @impl true
+  def handle_info({:session_event, event}, state) when is_map(event) do
+    # GongRPC 订阅会把完整 session 事件流投递到当前进程。
+    # 主链路只消费关键信号，其余事件在这里兜底吞掉，避免 error 噪音。
+    Logger.debug("dispatch_server.session_event.ignored", event: summarize_session_event(event))
+    {:noreply, state}
+  end
 
-        :not_found ->
-          execute_dispatch(state, context)
-      end
+  @impl true
+  def handle_info(message, state) do
+    Logger.error(
+      "#{inspect(__MODULE__)} received unexpected message in handle_info/2: #{inspect(message)}"
+    )
+
+    {:noreply, state}
+  end
+
+  defp run_dispatch(state, inbound_event) do
+    Logger.info("dispatch_server.run_dispatch.begin", event: summarize_event(inbound_event))
+
+    with {:ok, context} <- normalize_event(inbound_event),
+         :ok <- ensure_not_duplicate(context.run_id, state),
+         {:ok, bridge_payload} <- do_start_turn(state, context),
+         :ok <- do_send_final(state, context, bridge_payload) do
+      new_state = mark_processed(state, context)
+
+      Logger.info("dispatch_server.run_dispatch.ok",
+        request_id: context.request_id,
+        run_id: context.run_id,
+        session_key: context.session_key
+      )
+
+      {{:ok, build_dispatch_result(context, bridge_payload)}, new_state}
     else
+      {:duplicate, run_id} ->
+        _ = run_id
+        Logger.warning("dispatch_server.run_dispatch.duplicate", run_id: run_id)
+        {{:ok, :duplicate}, state}
+
+      {:bridge_error, error_payload, context} ->
+        Logger.error("dispatch_server.run_dispatch.bridge_error",
+          request_id: context.request_id,
+          run_id: context.run_id,
+          type: Map.get(error_payload, :type),
+          code: Map.get(error_payload, :code),
+          message: Map.get(error_payload, :message),
+          details: Map.get(error_payload, :details),
+          error_payload:
+            inspect(error_payload, pretty: true, limit: :infinity, printable_limit: :infinity)
+        )
+
+        error_payload = ensure_error_egress_result(state, context, error_payload)
+        new_state = maybe_mark_processed(state, context, error_payload)
+        {{:error, build_error_result(context, error_payload)}, new_state}
+
+      {:egress_error, reason, context} ->
+        Logger.error("dispatch_server.run_dispatch.egress_error",
+          request_id: context.request_id,
+          run_id: context.run_id,
+          reason: inspect(reason)
+        )
+
+        error_payload = %{
+          type: :failed,
+          code: "EGRESS_ERROR",
+          message: "egress send failed",
+          details: %{reason: inspect(reason)}
+        }
+
+        error_payload = ensure_error_egress_result(state, context, error_payload)
+        new_state = maybe_mark_processed(state, context, error_payload)
+        {{:error, build_error_result(context, error_payload)}, new_state}
+
       {:error, reason} ->
+        Logger.error("dispatch_server.run_dispatch.invalid_event", reason: inspect(reason))
+
         synthetic_context = fallback_context(inbound_event)
 
         error_payload = %{
@@ -129,49 +190,30 @@ defmodule Men.Gateway.DispatchServer do
         }
 
         error_payload = ensure_error_egress_result(state, synthetic_context, error_payload)
-        error_result = build_error_result(synthetic_context, error_payload)
-        log_failed(synthetic_context, default_run_context(synthetic_context), error_payload)
-        {{:error, error_result}, state}
+        {{:error, build_error_result(synthetic_context, error_payload)}, state}
     end
   end
 
-  defp execute_dispatch(state, context) do
-    log_started(context)
+  defp summarize_event(%{} = inbound_event) do
+    %{
+      request_id: Map.get(inbound_event, :request_id),
+      run_id: Map.get(inbound_event, :run_id),
+      channel: Map.get(inbound_event, :channel),
+      user_id: Map.get(inbound_event, :user_id),
+      session_key: Map.get(inbound_event, :session_key)
+    }
+  end
 
-    case do_start_turn(state, context) do
-      {:ok, bridge_payload, run_context} ->
-        case do_send_final(state, context, bridge_payload) do
-          :ok ->
-            dispatch_result = build_dispatch_result(context, bridge_payload)
-            reply = {:ok, dispatch_result}
-            new_state = mark_terminal(state, context, run_context, reply)
-            log_transition(:run_completed, context, run_context)
-            {reply, new_state}
+  defp summarize_event(other), do: %{raw: inspect(other)}
 
-          {:error, reason} ->
-            error_payload = %{
-              type: :failed,
-              code: "EGRESS_ERROR",
-              message: "egress send failed",
-              details: %{reason: inspect(reason)}
-            }
-
-            error_payload = ensure_error_egress_result(state, context, error_payload)
-            error_result = build_error_result(context, error_payload)
-            reply = {:error, error_result}
-            new_state = maybe_mark_terminal(state, context, run_context, reply, error_payload)
-            log_failed(context, run_context, error_payload)
-            {reply, new_state}
-        end
-
-      {:bridge_error, error_payload, run_context} ->
-        error_payload = ensure_error_egress_result(state, context, error_payload)
-        error_result = build_error_result(context, error_payload)
-        reply = {:error, error_result}
-        new_state = maybe_mark_terminal(state, context, run_context, reply, error_payload)
-        log_failed(context, run_context, error_payload)
-        {reply, new_state}
-    end
+  defp summarize_session_event(event) do
+    %{
+      type: Map.get(event, :type, Map.get(event, "type")),
+      seq: Map.get(event, :seq, Map.get(event, "seq")),
+      session_id: Map.get(event, :session_id, Map.get(event, "session_id")),
+      turn_id: Map.get(event, :turn_id, Map.get(event, "turn_id")),
+      command_id: Map.get(event, :command_id, Map.get(event, "command_id"))
+    }
   end
 
   # 错误回写失败时统一抬升为 egress 失败，避免调用方误判。
@@ -248,6 +290,10 @@ defmodule Men.Gateway.DispatchServer do
   defp normalize_metadata(%{} = metadata), do: {:ok, metadata}
   defp normalize_metadata(_), do: {:error, {:invalid_field, :metadata}}
 
+  defp ensure_not_duplicate(run_id, state) do
+    if MapSet.member?(state.processed_run_ids, run_id), do: {:duplicate, run_id}, else: :ok
+  end
+
   # 将 payload 转为 runtime 可消费的字符串 prompt。
   defp payload_to_prompt(payload) when is_binary(payload), do: {:ok, payload}
 
@@ -259,167 +305,131 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   defp do_start_turn(state, context) do
-    with {:ok, prompt} <- payload_to_prompt(context.payload),
-         {:ok, run_context} <-
-           resolve_runtime_context(state, context.session_key, context.run_id, 1) do
-      case call_bridge(state, prompt, context, run_context) do
+    runtime_session_id = resolve_runtime_session_id(state, context.session_key)
+
+    bridge_context =
+      %{
+        request_id: context.request_id,
+        session_key: runtime_session_id,
+        external_session_key: context.session_key,
+        run_id: context.run_id
+      }
+      |> maybe_put_event_callback(state, context)
+
+    with {:ok, prompt} <- payload_to_prompt(context.payload) do
+      case state.bridge_adapter.start_turn(prompt, bridge_context) do
         {:ok, payload} ->
-          {:ok, payload, run_context}
+          {:ok, payload}
 
         {:error, error_payload} ->
-          maybe_retry_start_turn(state, context, prompt, run_context, error_payload)
+          maybe_invalidate_runtime_session(
+            state,
+            context.session_key,
+            runtime_session_id,
+            error_payload
+          )
+
+          {:bridge_error, error_payload, context}
       end
     else
-      {:error, {:invalid_payload, reason}} ->
+      {:error, reason} ->
         {:bridge_error,
          %{
            type: :failed,
            code: "INVALID_PAYLOAD",
            message: "payload encode failed",
            details: %{reason: inspect(reason)}
-         }, default_run_context(context)}
+         }, context}
+    end
+  end
+
+  defp maybe_put_event_callback(context_map, %{streaming_enabled: true} = state, context) do
+    Map.put(context_map, :event_callback, build_event_callback(state, context))
+  end
+
+  defp maybe_put_event_callback(context_map, _state, _context), do: context_map
+
+  defp build_event_callback(state, context) do
+    fn event ->
+      case do_send_event(state, context, event) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("dispatch_server.run_dispatch.event_egress_error",
+            request_id: context.request_id,
+            run_id: context.run_id,
+            reason: inspect(reason)
+          )
+
+          :ok
+      end
+    end
+  end
+
+  defp resolve_runtime_session_id(%{session_coordinator_enabled: false}, session_key),
+    do: session_key
+
+  defp resolve_runtime_session_id(state, session_key) do
+    case safe_get_or_create_runtime_session_id(state.session_coordinator_name, session_key) do
+      {:ok, runtime_session_id} ->
+        runtime_session_id
 
       {:error, _reason} ->
-        {:bridge_error,
-         %{
-           type: :failed,
-           code: "SESSION_RESOLVE_FAILED",
-           message: "runtime session resolve failed",
-           details: %{}
-         }, default_run_context(context)}
-    end
-  end
-
-  defp maybe_retry_start_turn(state, context, prompt, run_context, error_payload) do
-    if should_retry_session_not_found?(state, run_context, error_payload) do
-      log_transition(:retry_triggered, context, run_context, %{
-        code: Map.get(error_payload, :code)
-      })
-
-      case rebuild_runtime_context(state, context.session_key, context.run_id, 2) do
-        {:ok, retry_context} ->
-          case call_bridge(state, prompt, context, retry_context) do
-            {:ok, payload} -> {:ok, payload, retry_context}
-            {:error, retry_error_payload} -> {:bridge_error, retry_error_payload, retry_context}
-          end
-
-        {:error, _reason} ->
-          {:bridge_error, error_payload, run_context}
-      end
-    else
-      {:bridge_error, error_payload, run_context}
-    end
-  end
-
-  defp resolve_runtime_context(
-         %{session_coordinator_enabled: false},
-         session_key,
-         run_id,
-         attempt
-       ) do
-    {:ok,
-     %{
-       run_id: run_id,
-       session_key: session_key,
-       runtime_session_id: session_key,
-       attempt: attempt
-     }}
-  end
-
-  defp resolve_runtime_context(state, session_key, run_id, attempt) do
-    runtime_session_id =
-      case safe_get_or_create_runtime_session_id(state.session_coordinator_name, session_key) do
-        {:ok, resolved_runtime_session_id} -> resolved_runtime_session_id
-        {:error, _reason} -> session_key
-      end
-
-    run_context = %{
-      run_id: run_id,
-      session_key: session_key,
-      runtime_session_id: runtime_session_id,
-      attempt: attempt
-    }
-
-    log_transition(:session_resolved, %{run_id: run_id, session_key: session_key}, run_context)
-    {:ok, run_context}
-  end
-
-  defp rebuild_runtime_context(
-         %{session_coordinator_enabled: false},
-         session_key,
-         run_id,
-         attempt
-       ) do
-    {:ok,
-     %{
-       run_id: run_id,
-       session_key: session_key,
-       runtime_session_id: session_key,
-       attempt: attempt
-     }}
-  end
-
-  defp rebuild_runtime_context(state, session_key, run_id, attempt) do
-    case safe_rebuild_runtime_session_id(state.session_coordinator_name, session_key) do
-      {:ok, runtime_session_id} ->
-        run_context = %{
-          run_id: run_id,
-          session_key: session_key,
-          runtime_session_id: runtime_session_id,
-          attempt: attempt
-        }
-
-        log_transition(
-          :session_resolved,
-          %{run_id: run_id, session_key: session_key},
-          run_context
-        )
-
-        {:ok, run_context}
-
-      {:error, reason} ->
-        {:error, reason}
+        session_key
     end
   end
 
   # coordinator 可能在调用窗口重启，捕获 exit 以保证 dispatch 可降级。
   defp safe_get_or_create_runtime_session_id(coordinator_name, session_key) do
     try do
-      SessionCoordinator.get_or_create_session(coordinator_name, session_key)
+      SessionCoordinator.get_or_create(
+        coordinator_name,
+        session_key,
+        &generate_runtime_session_id/0
+      )
     catch
       :exit, _reason -> {:error, :session_coordinator_unavailable}
     end
   end
 
-  # 重建属于受控自愈，coordinator 不可用时维持原错误返回。
-  defp safe_rebuild_runtime_session_id(coordinator_name, session_key) do
+  defp maybe_invalidate_runtime_session(
+         %{session_coordinator_enabled: false},
+         _session_key,
+         _runtime_session_id,
+         _error_payload
+       ),
+       do: :ok
+
+  defp maybe_invalidate_runtime_session(state, session_key, runtime_session_id, error_payload) do
+    code =
+      error_payload
+      |> Map.get(:code)
+      |> normalize_error_code()
+
+    if code == "",
+      do: :ok,
+      else: invalidate_session_mapping(state, session_key, runtime_session_id, code)
+  end
+
+  defp invalidate_session_mapping(state, session_key, runtime_session_id, code) do
+    _ =
+      safe_invalidate_session_mapping(state.session_coordinator_name, %{
+        session_key: session_key,
+        runtime_session_id: runtime_session_id,
+        code: code
+      })
+
+    :ok
+  end
+
+  # 失效剔除属于尽力而为，coordinator 不可用时不影响主链路返回。
+  defp safe_invalidate_session_mapping(coordinator_name, reason) do
     try do
-      SessionCoordinator.rebuild_session(coordinator_name, session_key)
+      SessionCoordinator.invalidate_by_session_key(coordinator_name, reason)
     catch
-      :exit, _reason -> {:error, :session_coordinator_unavailable}
+      :exit, _reason -> :ignored
     end
-  end
-
-  defp call_bridge(state, prompt, context, run_context) do
-    bridge_context = %{
-      request_id: context.request_id,
-      session_key: run_context.runtime_session_id,
-      external_session_key: context.session_key,
-      run_id: context.run_id
-    }
-
-    state.bridge_adapter.start_turn(prompt, bridge_context)
-  end
-
-  defp should_retry_session_not_found?(state, run_context, error_payload) do
-    state.session_rebuild_retry_enabled and
-      run_context.attempt == 1 and
-      retryable_session_not_found_code?(Map.get(error_payload, :code))
-  end
-
-  defp retryable_session_not_found_code?(code) do
-    normalized_code = normalize_error_code(code)
-    normalized_code == "session_not_found"
   end
 
   defp normalize_error_code(code) when is_atom(code),
@@ -429,6 +439,10 @@ defmodule Men.Gateway.DispatchServer do
     do: code |> String.trim() |> String.downcase()
 
   defp normalize_error_code(_), do: ""
+
+  defp generate_runtime_session_id do
+    "runtime-session-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+  end
 
   defp do_send_final(state, context, bridge_payload) do
     metadata =
@@ -446,7 +460,10 @@ defmodule Men.Gateway.DispatchServer do
       metadata: metadata
     }
 
-    state.egress_adapter.send(context.session_key, message)
+    case state.egress_adapter.send(context.session_key, message) do
+      :ok -> :ok
+      {:error, reason} -> {:egress_error, reason, context}
+    end
   end
 
   defp do_send_error(state, context, error_payload) do
@@ -468,60 +485,80 @@ defmodule Men.Gateway.DispatchServer do
     state.egress_adapter.send(context.session_key, message)
   end
 
-  defp fetch_terminal_result(state, run_id) do
-    case Map.fetch(state.run_terminal_results, run_id) do
-      {:ok, cached_reply} -> {:ok, cached_reply}
-      :error -> :not_found
-    end
+  defp do_send_event(state, context, %{type: :delta, payload: payload}) do
+    stream_payload = normalize_stream_payload(payload)
+
+    message = %EventMessage{
+      event_type: :delta,
+      payload: stream_payload,
+      metadata:
+        context.metadata
+        |> Map.merge(%{
+          request_id: context.request_id,
+          run_id: context.run_id,
+          session_key: context.session_key,
+          seq: System.unique_integer([:positive, :monotonic]),
+          timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+        })
+        |> Map.merge(stream_metadata(stream_payload))
+    }
+
+    state.egress_adapter.send(context.session_key, message)
   end
 
-  defp mark_terminal(state, context, run_context, reply) do
-    next_state = put_terminal_result(state, context.run_id, reply)
+  defp do_send_event(_state, _context, _event), do: :ok
 
+  defp normalize_stream_payload(payload) when is_map(payload) do
+    text =
+      case map_value(payload, :text, "") do
+        value when is_binary(value) -> value
+        _ -> ""
+      end
+
+    %{}
+    |> Map.put(:text, text)
+    |> put_if_binary(:tool_name, map_value(payload, :tool_name, nil))
+    |> put_if_binary(:tool_status, map_value(payload, :tool_status, nil))
+    |> put_if_binary(:rate_used_pct, map_value(payload, :rate_used_pct, nil))
+    |> put_if_binary(:phase, map_value(payload, :phase, nil))
+  end
+
+  defp normalize_stream_payload(text) when is_binary(text), do: %{text: text}
+  defp normalize_stream_payload(_), do: %{text: ""}
+
+  defp stream_metadata(payload) when is_map(payload) do
+    %{}
+    |> put_if_binary(:tool_name, Map.get(payload, :tool_name))
+    |> put_if_binary(:tool_status, Map.get(payload, :tool_status))
+    |> put_if_binary(:rate_used_pct, Map.get(payload, :rate_used_pct))
+    |> put_if_binary(:phase, Map.get(payload, :phase))
+  end
+
+  defp stream_metadata(_), do: %{}
+
+  defp put_if_binary(map, _key, nil), do: map
+
+  defp put_if_binary(map, key, value) when is_binary(value) do
+    Map.put(map, key, value)
+  end
+
+  defp put_if_binary(map, _key, _value), do: map
+
+  defp map_value(map, key, default) when is_map(map) do
+    Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+  end
+
+  defp mark_processed(state, context) do
     %{
-      next_state
-      | session_last_context:
-          Map.put(state.session_last_context, context.session_key, run_context),
-        run_terminal_results: next_state.run_terminal_results,
-        run_terminal_order: next_state.run_terminal_order
+      state
+      | processed_run_ids: MapSet.put(state.processed_run_ids, context.run_id),
+        session_last_context: Map.put(state.session_last_context, context.session_key, context)
     }
   end
 
-  defp put_terminal_result(state, run_id, reply) do
-    if Map.has_key?(state.run_terminal_results, run_id) do
-      %{state | run_terminal_results: Map.put(state.run_terminal_results, run_id, reply)}
-    else
-      state
-      |> Map.update!(:run_terminal_results, &Map.put(&1, run_id, reply))
-      |> Map.update!(:run_terminal_order, &:queue.in(run_id, &1))
-      |> evict_terminal_results()
-    end
-  end
-
-  # 终态缓存为幂等兜底，不追求永久保留；采用 FIFO 控制内存上界。
-  defp evict_terminal_results(state) do
-    if map_size(state.run_terminal_results) <= state.run_terminal_limit do
-      state
-    else
-      case :queue.out(state.run_terminal_order) do
-        {{:value, oldest_run_id}, next_order} ->
-          state
-          |> Map.put(:run_terminal_order, next_order)
-          |> Map.update!(:run_terminal_results, &Map.delete(&1, oldest_run_id))
-          |> evict_terminal_results()
-
-        {:empty, _queue} ->
-          state
-      end
-    end
-  end
-
   # egress 失败时不记录已处理，允许同 run_id 做恢复性重试。
-  defp maybe_mark_terminal(state, _context, _run_context, _reply, %{code: "EGRESS_ERROR"}),
-    do: state
-
-  defp maybe_mark_terminal(state, context, run_context, reply, _error_payload),
-    do: mark_terminal(state, context, run_context, reply)
+  defp maybe_mark_processed(state, _context, %{code: "EGRESS_ERROR"}), do: state
+  defp maybe_mark_processed(state, context, _error_payload), do: mark_processed(state, context)
 
   defp build_dispatch_result(context, bridge_payload) do
     %{
@@ -546,32 +583,6 @@ defmodule Men.Gateway.DispatchServer do
           type: Map.get(error_payload, :type),
           details: Map.get(error_payload, :details)
         })
-    }
-  end
-
-  defp log_started(context) do
-    log_transition(:run_started, context, default_run_context(context))
-  end
-
-  defp log_failed(context, run_context, error_payload) do
-    log_transition(:run_failed, context, run_context, %{code: Map.get(error_payload, :code)})
-  end
-
-  # 状态流转使用统一日志格式，便于按 run/session 追踪。
-  defp log_transition(event, context, run_context, extra \\ %{}) do
-    Logger.info(
-      "gateway.dispatch event=#{event} run_id=#{context.run_id} session_key=#{context.session_key} " <>
-        "runtime_session_id=#{run_context.runtime_session_id} attempt=#{run_context.attempt} " <>
-        "extra=#{inspect(extra)}"
-    )
-  end
-
-  defp default_run_context(context) do
-    %{
-      run_id: context.run_id,
-      session_key: context.session_key,
-      runtime_session_id: context.session_key,
-      attempt: 1
     }
   end
 

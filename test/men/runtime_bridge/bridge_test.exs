@@ -9,27 +9,13 @@ defmodule Men.RuntimeBridge.BridgeTest do
     @impl true
     def open(%Request{} = request, _opts) do
       notify({:open_called, request})
-
-      {:ok,
-       %Response{
-         runtime_id: request.runtime_id,
-         session_id: request.session_id,
-         payload: :opened,
-         metadata: %{source: :new}
-       }}
+      {:ok, %Response{runtime_id: request.runtime_id, session_id: request.session_id, payload: :opened, metadata: %{source: :new}}}
     end
 
     @impl true
     def get(%Request{} = request, _opts) do
       notify({:get_called, request})
-
-      {:ok,
-       %Response{
-         runtime_id: request.runtime_id,
-         session_id: request.session_id,
-         payload: %{status: :active},
-         metadata: %{source: :new}
-       }}
+      {:ok, %Response{runtime_id: request.runtime_id, session_id: request.session_id, payload: %{status: :active}, metadata: %{source: :new}}}
     end
 
     @impl true
@@ -47,14 +33,7 @@ defmodule Men.RuntimeBridge.BridgeTest do
 
     def prompt(%Request{} = request, _opts) do
       notify({:prompt_called, request})
-
-      {:ok,
-       %Response{
-         runtime_id: request.runtime_id,
-         session_id: request.session_id,
-         payload: "runtime-ok",
-         metadata: %{source: :new}
-       }}
+      {:ok, %Response{runtime_id: request.runtime_id, session_id: request.session_id, payload: "runtime-ok", metadata: %{source: :new}}}
     end
 
     @impl true
@@ -73,14 +52,7 @@ defmodule Men.RuntimeBridge.BridgeTest do
     @impl true
     def close(%Request{} = request, _opts) do
       notify({:close_called, request})
-
-      {:ok,
-       %Response{
-         runtime_id: request.runtime_id,
-         session_id: request.session_id,
-         payload: :closed,
-         metadata: %{source: :new}
-       }}
+      {:ok, %Response{runtime_id: request.runtime_id, session_id: request.session_id, payload: :closed, metadata: %{source: :new}}}
     end
 
     @impl true
@@ -116,8 +88,7 @@ defmodule Men.RuntimeBridge.BridgeTest do
 
     @impl true
     def start_turn(_prompt, _context) do
-      {:error,
-       %{code: "NEW_REMOTE_ERROR", message: "legacy failed", details: %{source: :legacy_only}}}
+      {:error, %{code: "NEW_REMOTE_ERROR", message: "legacy failed", details: %{source: :legacy_only}}}
     end
   end
 
@@ -145,14 +116,7 @@ defmodule Men.RuntimeBridge.BridgeTest do
     @impl true
     def prompt(%Request{} = request, _opts) do
       notify({:prompt_only_called, request})
-
-      {:ok,
-       %Response{
-         runtime_id: request.runtime_id,
-         session_id: request.session_id,
-         payload: "prompt-only",
-         metadata: %{source: :prompt_only}
-       }}
+      {:ok, %Response{runtime_id: request.runtime_id, session_id: request.session_id, payload: "prompt-only", metadata: %{source: :prompt_only}}}
     end
 
     defp notify(message) do
@@ -168,9 +132,7 @@ defmodule Men.RuntimeBridge.BridgeTest do
     original_runtime_bridge = Application.get_env(:men, :runtime_bridge, [])
     Application.put_env(:men, :runtime_bridge_test_pid, self())
 
-    Application.put_env(
-      :men,
-      :runtime_bridge,
+    Application.put_env(:men, :runtime_bridge,
       original_runtime_bridge
       |> Keyword.put(:bridge_impl, MockRuntimeBridge)
       |> Keyword.put(:bridge_v1_enabled, false)
@@ -186,21 +148,8 @@ defmodule Men.RuntimeBridge.BridgeTest do
   end
 
   test "Request/Response/Error 结构体可构造" do
-    request = %Request{
-      runtime_id: "gong",
-      session_id: "sess-1",
-      payload: "hello",
-      opts: %{trace: "t1"},
-      timeout_ms: 2_000
-    }
-
-    response = %Response{
-      runtime_id: "gong",
-      session_id: "sess-1",
-      payload: "done",
-      metadata: %{token: "x"}
-    }
-
+    request = %Request{runtime_id: "gong", session_id: "sess-1", payload: "hello", opts: %{trace: "t1"}, timeout_ms: 2_000}
+    response = %Response{runtime_id: "gong", session_id: "sess-1", payload: "done", metadata: %{token: "x"}}
     error = %Error{code: :runtime_error, message: "failed", retryable: false, context: %{}}
 
     assert request.runtime_id == "gong"
@@ -239,9 +188,7 @@ defmodule Men.RuntimeBridge.BridgeTest do
       Application.get_env(:men, :runtime_bridge, []) |> Keyword.put(:bridge_v1_enabled, true)
     )
 
-    assert {:ok, payload} =
-             Bridge.start_turn("hello", %{session_key: "sess-4", request_id: "req-4"})
-
+    assert {:ok, payload} = Bridge.start_turn("hello", %{session_key: "sess-4", request_id: "req-4"})
     assert payload.text == "runtime-ok"
     assert payload.meta.source == :new
 
@@ -317,10 +264,7 @@ defmodule Men.RuntimeBridge.BridgeTest do
 
   test "deprecated start_turn 在 flag 关闭且 adapter 无 start_turn/2 时不走新路径 fallback" do
     assert {:error, error_payload} =
-             Bridge.start_turn("hello", %{session_key: "sess-no-legacy"},
-               adapter: PromptOnlyBridge,
-               bridge_v1_enabled: false
-             )
+             Bridge.start_turn("hello", %{session_key: "sess-no-legacy"}, adapter: PromptOnlyBridge, bridge_v1_enabled: false)
 
     assert error_payload.code == "unsupported_operation"
     assert error_payload.message == "adapter does not implement start_turn/2"

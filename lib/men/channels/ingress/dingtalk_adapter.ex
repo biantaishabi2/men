@@ -9,8 +9,7 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
   @default_window_seconds 300
 
   @impl true
-  def normalize(%{headers: headers, body: body} = request)
-      when is_map(headers) and is_map(body) do
+  def normalize(%{headers: headers, body: body} = request) when is_map(headers) and is_map(body) do
     with {:ok, secret} <- fetch_secret(),
          {:ok, timestamp} <- fetch_timestamp(headers),
          :ok <- verify_timestamp_window(timestamp, fetch_window_seconds()),
@@ -18,14 +17,9 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
          {:ok, raw_body} <- fetch_raw_body(request, body),
          :ok <- verify_signature(secret, timestamp, raw_body, signature),
          {:ok, event_type} <- fetch_required_binary(body, ["event_type", "type"], :event_type),
-         {:ok, sender_id} <-
-           fetch_required_binary(body, ["sender_id", "senderId", "userid"], :sender_id),
+         {:ok, sender_id} <- fetch_required_binary(body, ["sender_id", "senderId", "userid"], :sender_id),
          {:ok, conversation_id} <-
-           fetch_required_binary(
-             body,
-             ["conversation_id", "conversationId", "chat_id"],
-             :conversation_id
-           ),
+           fetch_required_binary(body, ["conversation_id", "conversationId", "chat_id"], :conversation_id),
          {:ok, content} <- fetch_required_binary(body, ["content", "text"], :content) do
       standardized_payload = %{
         channel: @channel,

@@ -1,297 +1,800 @@
 defmodule Men.RuntimeBridge.GongRPC do
   @moduledoc """
-  基于 Erlang RPC 的 RuntimeBridge 实现。
-
-  该模块保持无状态：不在进程内缓存任何会话或复用信息，
-  仅负责 RPC 调用、超时控制与错误映射。
+  基于分布式 Erlang RPC 的 Runtime Bridge 实现。
   """
 
   @behaviour Men.RuntimeBridge.Bridge
 
-  alias Men.RuntimeBridge.{Error, Request, Response}
+  require Logger
 
-  @default_runtime_id "gong"
-  @default_timeout_ms 30_000
+  alias Men.RuntimeBridge.NodeConnector
 
-  @impl true
-  def open(%Request{} = request, opts \\ []) do
-    invoke(:open, request, opts)
+  @default_rpc_timeout_ms 30_000
+  @default_completion_timeout_ms 60_000
+  @default_model "deepseek:deepseek-chat"
+  @default_session_idle_ttl_ms 30 * 60 * 1000
+  @default_session_cleanup_interval_ms 60 * 1000
+  @default_max_session_entries 1_000
+  @default_invalidation_codes ["session_not_found", "runtime_session_not_found"]
+
+  @session_table :men_gong_rpc_sessions
+  @last_cleanup_key {__MODULE__, :last_cleanup_ms}
+  @session_lock_prefix {:men_gong_rpc_lock, :session_key}
+
+  defmodule RPCClient do
+    @moduledoc false
+
+    @callback call(node(), module(), atom(), [term()], timeout()) :: term()
+    @callback ping(node()) :: :pong | :pang
+  end
+
+  defmodule ErlangRPCClient do
+    @moduledoc false
+    @behaviour RPCClient
+
+    @impl true
+    def call(node, module, function, args, timeout) do
+      :rpc.call(node, module, function, args, timeout)
+    end
+
+    @impl true
+    def ping(node), do: Node.ping(node)
   end
 
   @impl true
-  def get(%Request{} = request, opts \\ []) do
-    invoke(:get, request, opts)
-  end
+  def start_turn(prompt, context) when is_binary(prompt) and is_map(context) do
+    started_at = System.monotonic_time(:millisecond)
+    cfg = runtime_config()
+    rpc_client = Keyword.get(cfg, :rpc_client, ErlangRPCClient)
+    connector = Keyword.get(cfg, :node_connector, NodeConnector)
+    rpc_timeout_ms = timeout_ms(cfg, :rpc_timeout_ms, @default_rpc_timeout_ms)
+    completion_timeout_ms = timeout_ms(cfg, :completion_timeout_ms, @default_completion_timeout_ms)
 
-  @impl true
-  def prompt(%Request{} = request, opts \\ []) do
-    invoke(:prompt, request, opts)
-  end
+    request_id = context_value(context, :request_id, "unknown_request")
+    session_key = context_value(context, :session_key, "unknown_session")
+    run_id = context_value(context, :run_id, generate_run_id())
+    event_callback = event_callback_from_context(context)
 
-  @impl true
-  def close(%Request{} = request, opts \\ []) do
-    case invoke(:close, request, opts) do
-      {:error, %Error{code: :session_not_found}} ->
-        {:ok,
-         %Response{
-           runtime_id: normalize_runtime_id(request.runtime_id),
-           session_id: request.session_id,
-           payload: :closed,
-           metadata: %{idempotent: true, reason: :session_not_found}
-         }}
+    with {:ok, gong_node} <- connector.ensure_connected(cfg, rpc_client),
+         :ok <- maybe_cleanup_sessions(gong_node, rpc_client, cfg, rpc_timeout_ms),
+         {:ok, text, _entry, reused?} <-
+           run_turn_with_rebuild(
+             gong_node,
+             rpc_client,
+             cfg,
+             prompt,
+             request_id,
+             session_key,
+             run_id,
+             event_callback,
+             rpc_timeout_ms,
+             completion_timeout_ms
+           ) do
+      duration_ms = System.monotonic_time(:millisecond) - started_at
 
-      other ->
-        other
+      {:ok,
+       %{
+         text: text,
+         meta: %{
+           run_id: run_id,
+           request_id: request_id,
+           session_key: session_key,
+           duration_ms: duration_ms,
+           transport: "rpc",
+           session_reused: reused?
+         }
+       }}
+    else
+      {:error, error_payload} when is_map(error_payload) ->
+        {:error, Map.merge(default_context(request_id, session_key, run_id), error_payload)}
     end
   end
 
-  @impl true
-  def start_turn(prompt_text, context) when is_binary(prompt_text) and is_map(context) do
-    request =
-      %Request{
-        runtime_id:
-          normalize_runtime_id(Map.get(context, :runtime_id) || Map.get(context, "runtime_id")),
-        session_id:
-          Map.get(context, :session_id) || Map.get(context, "session_id") ||
-            Map.get(context, :session_key) || Map.get(context, "session_key"),
-        payload: prompt_text,
-        opts: Map.drop(context, [:runtime_id, :session_id, :session_key]),
-        timeout_ms: nil
-      }
-
-    case prompt(request, []) do
-      {:ok, %Response{} = response} ->
-        metadata = normalize_metadata(response.metadata)
-
-        {:ok,
-         %{
-           text: normalize_payload_text(response.payload),
-           meta:
-             Map.merge(metadata, %{
-               runtime_id: response.runtime_id,
-               session_key: response.session_id
-             })
-         }}
-
-      {:error, %Error{} = error} ->
-        {:error,
-         %{
-           type: :failed,
-           code: Atom.to_string(error.code),
-           message: error.message,
-           run_id: Map.get(context, :run_id),
-           request_id: Map.get(context, :request_id),
-           session_key: Map.get(context, :session_key),
-           details: error.context
-         }}
-    end
+  def start_turn(prompt, context) when is_binary(prompt) and is_list(context) do
+    start_turn(prompt, Map.new(context))
   end
 
-  def start_turn(prompt_text, context) when is_binary(prompt_text) and is_list(context) do
-    start_turn(prompt_text, Map.new(context))
-  end
-
-  def start_turn(_prompt_text, _context) do
+  def start_turn(_prompt, _context) do
     raise ArgumentError, "start_turn/2 expects prompt binary and context map/keyword"
   end
 
-  defp invoke(action, %Request{} = request, opts) do
-    config = runtime_config()
-    timeout_ms = resolve_timeout(request.timeout_ms, opts, config)
-    node_name = Keyword.get(opts, :gong_node, Keyword.get(config, :gong_node, node()))
-    rpc_module = Keyword.get(opts, :rpc_module, Keyword.get(config, :rpc_module, :rpc))
+  @doc false
+  def __reset_session_registry_for_test__ do
+    if :ets.whereis(@session_table) != :undefined do
+      :ets.delete_all_objects(@session_table)
+    end
 
-    {remote_module, remote_function} = resolve_remote_target(action, opts, config)
+    :persistent_term.erase(@last_cleanup_key)
+    :ok
+  end
 
-    rpc_payload = %{
-      runtime_id: normalize_runtime_id(request.runtime_id),
-      session_id: request.session_id,
-      payload: request.payload,
-      opts: request.opts || %{},
-      timeout_ms: timeout_ms
-    }
-
-    rpc_result =
-      apply(rpc_module, :call, [
-        node_name,
-        remote_module,
-        remote_function,
-        [rpc_payload],
-        timeout_ms
-      ])
-
-    map_rpc_result(action, rpc_result, rpc_payload)
+  @doc false
+  def __set_session_last_access_for_test__(session_key, last_access_at_ms)
+      when is_binary(session_key) and is_integer(last_access_at_ms) do
+    ensure_session_table!()
+    :ets.update_element(@session_table, session_key, {4, last_access_at_ms})
+    :ok
   rescue
-    error ->
-      {:error,
-       %Error{
-         code: :transport_error,
-         message: "rpc transport failed",
-         retryable: true,
-         context: %{error: inspect(error), action: action}
-       }}
+    ArgumentError ->
+      :ok
   end
 
-  defp map_rpc_result(_action, {:ok, payload}, request_payload) do
-    {:ok, normalize_response(payload, request_payload)}
+  @doc false
+  def __force_cleanup_next_turn_for_test__ do
+    :persistent_term.erase(@last_cleanup_key)
+    :ok
   end
 
-  defp map_rpc_result(_action, {:error, reason}, _request_payload) do
-    {:error, normalize_runtime_error(reason)}
+  defp run_turn_with_rebuild(
+         gong_node,
+         rpc_client,
+         cfg,
+         prompt,
+         request_id,
+         session_key,
+         run_id,
+         event_callback,
+         rpc_timeout_ms,
+         completion_timeout_ms
+       ) do
+    with {:ok, entry, reused?} <-
+           get_or_create_session_entry(
+             gong_node,
+             rpc_client,
+             cfg,
+             rpc_timeout_ms,
+             request_id,
+             session_key,
+             run_id
+           ) do
+      case run_turn(
+             gong_node,
+             entry.session_pid,
+             rpc_client,
+             cfg,
+             prompt,
+             rpc_timeout_ms,
+             completion_timeout_ms,
+             request_id,
+             session_key,
+             run_id,
+             event_callback
+           ) do
+        {:ok, text} ->
+          touch_session_entry(session_key)
+          {:ok, text, entry, reused?}
+
+        {:error, error_payload} ->
+          if should_rebuild_session?(cfg, error_payload) do
+            Logger.warning("gong_rpc.session.rebuild",
+              session_key: session_key,
+              run_id: run_id,
+              reason: Map.get(error_payload, :code, "unknown")
+            )
+
+            invalidate_session_entry(gong_node, rpc_client, rpc_timeout_ms, session_key, :error)
+
+            with {:ok, rebuilt_entry, _reused?} <-
+                   get_or_create_session_entry(
+                     gong_node,
+                     rpc_client,
+                     cfg,
+                     rpc_timeout_ms,
+                     request_id,
+                     session_key,
+                     run_id
+                   ),
+                 {:ok, rebuilt_text} <-
+                   run_turn(
+                     gong_node,
+                     rebuilt_entry.session_pid,
+                     rpc_client,
+                     cfg,
+                     prompt,
+                     rpc_timeout_ms,
+                     completion_timeout_ms,
+                     request_id,
+                     session_key,
+                     run_id,
+                     event_callback
+                   ) do
+              touch_session_entry(session_key)
+              {:ok, rebuilt_text, rebuilt_entry, false}
+            end
+          else
+            {:error, error_payload}
+          end
+      end
+    end
   end
 
-  defp map_rpc_result(_action, {:badrpc, :timeout}, _request_payload), do: timeout_error()
-  defp map_rpc_result(_action, {:badrpc, {:timeout, _}}, _request_payload), do: timeout_error()
-
-  defp map_rpc_result(_action, {:badrpc, reason}, _request_payload) do
-    {:error,
-     %Error{
-       code: :transport_error,
-       message: "rpc badrpc",
-       retryable: true,
-       context: %{reason: inspect(reason)}
-     }}
+  defp run_turn(
+         gong_node,
+         session_pid,
+         rpc_client,
+         _cfg,
+         prompt,
+         rpc_timeout_ms,
+         completion_timeout_ms,
+         request_id,
+         session_key,
+         run_id,
+         event_callback
+       ) do
+    with :ok <- subscribe_session(gong_node, session_pid, rpc_client, rpc_timeout_ms, request_id, session_key, run_id),
+         :ok <- prompt_session(gong_node, session_pid, prompt, rpc_client, rpc_timeout_ms, request_id, session_key, run_id),
+         {:ok, text} <-
+           await_completion(
+             gong_node,
+             session_pid,
+             rpc_client,
+             rpc_timeout_ms,
+             completion_timeout_ms,
+             request_id,
+             session_key,
+             run_id,
+             event_callback
+           ) do
+      {:ok, text}
+    end
   end
 
-  defp map_rpc_result(_action, payload, _request_payload) do
-    {:ok,
-     %Response{
-       runtime_id: @default_runtime_id,
-       session_id: nil,
-       payload: payload,
-       metadata: %{}
-     }}
+  defp get_or_create_session_entry(
+         gong_node,
+         rpc_client,
+         cfg,
+         rpc_timeout_ms,
+         request_id,
+         session_key,
+         run_id
+       ) do
+    lock_session_key(session_key, fn ->
+      case lookup_session_entry(session_key) do
+        {:ok, entry} ->
+          touch_session_entry(session_key)
+          Logger.debug("gong_rpc.session.hit", session_key: session_key, run_id: run_id)
+          {:ok, entry, true}
+
+        :error ->
+          with {:ok, session_pid, session_id} <-
+                 create_session(gong_node, rpc_client, cfg, rpc_timeout_ms, request_id, session_key, run_id),
+               :ok <- subscribe_session(gong_node, session_pid, rpc_client, rpc_timeout_ms, request_id, session_key, run_id) do
+            entry = %{
+              session_key: session_key,
+              session_id: session_id,
+              session_pid: session_pid,
+              last_access_at_ms: now_ms()
+            }
+
+            put_session_entry(entry)
+            Logger.info("gong_rpc.session.created", session_key: session_key, session_id: session_id, run_id: run_id)
+            {:ok, entry, false}
+          end
+      end
+    end)
   end
 
-  defp normalize_response(%Response{} = response, _request_payload), do: response
+  defp maybe_cleanup_sessions(gong_node, rpc_client, cfg, rpc_timeout_ms) do
+    interval_ms = timeout_ms(cfg, :session_cleanup_interval_ms, @default_session_cleanup_interval_ms)
+    current = now_ms()
+    last = :persistent_term.get(@last_cleanup_key, 0)
 
-  defp normalize_response(%{} = payload, request_payload) do
-    %Response{
-      runtime_id:
-        normalize_runtime_id(
-          Map.get(payload, :runtime_id) || Map.get(payload, "runtime_id") ||
-            request_payload.runtime_id
-        ),
-      session_id:
-        Map.get(payload, :session_id) || Map.get(payload, "session_id") ||
-          request_payload.session_id,
-      payload: Map.get(payload, :payload, Map.get(payload, "payload")),
-      metadata:
-        payload
-        |> Map.get(:metadata, Map.get(payload, "metadata", %{}))
-        |> normalize_metadata()
-    }
+    if current - last >= interval_ms do
+      :persistent_term.put(@last_cleanup_key, current)
+
+      cleanup_expired_sessions(gong_node, rpc_client, cfg, rpc_timeout_ms, current)
+      cleanup_lru_sessions(gong_node, rpc_client, cfg, rpc_timeout_ms)
+    end
+
+    :ok
   end
 
-  defp normalize_response(payload, request_payload) do
-    %Response{
-      runtime_id: request_payload.runtime_id,
-      session_id: request_payload.session_id,
-      payload: payload,
-      metadata: %{}
-    }
+  defp cleanup_expired_sessions(gong_node, rpc_client, cfg, rpc_timeout_ms, current_ms) do
+    ttl_ms = timeout_ms(cfg, :session_idle_ttl_ms, @default_session_idle_ttl_ms)
+
+    list_session_entries()
+    |> Enum.filter(fn entry -> current_ms - entry.last_access_at_ms >= ttl_ms end)
+    |> Enum.each(fn entry ->
+      close_and_remove_session(gong_node, rpc_client, rpc_timeout_ms, entry, :ttl)
+    end)
   end
 
-  defp normalize_runtime_error(%Error{} = error), do: error
+  defp cleanup_lru_sessions(gong_node, rpc_client, cfg, rpc_timeout_ms) do
+    max_entries = timeout_ms(cfg, :max_session_entries, @default_max_session_entries)
+    entries = list_session_entries()
+    overflow = max(length(entries) - max_entries, 0)
 
-  defp normalize_runtime_error(%{code: code, message: message} = payload) do
-    normalized_code = normalize_code(code)
-
-    %Error{
-      code: normalized_code,
-      message: message,
-      retryable: Map.get(payload, :retryable, retryable_code?(normalized_code)),
-      context: Map.get(payload, :context, %{})
-    }
+    if overflow > 0 do
+      entries
+      |> Enum.sort_by(& &1.last_access_at_ms, :asc)
+      |> Enum.take(overflow)
+      |> Enum.each(fn entry ->
+        close_and_remove_session(gong_node, rpc_client, rpc_timeout_ms, entry, :lru)
+      end)
+    end
   end
 
-  defp normalize_runtime_error(%{"code" => code, "message" => message} = payload) do
-    normalized_code = normalize_code(code)
+  defp invalidate_session_entry(gong_node, rpc_client, rpc_timeout_ms, session_key, reason) do
+    lock_session_key(session_key, fn ->
+      case lookup_session_entry(session_key) do
+        {:ok, entry} ->
+          close_and_remove_session(gong_node, rpc_client, rpc_timeout_ms, entry, reason)
+          :ok
 
-    %Error{
-      code: normalized_code,
-      message: message,
-      retryable: Map.get(payload, "retryable", retryable_code?(normalized_code)),
-      context: Map.get(payload, "context", %{})
-    }
+        :error ->
+          :ok
+      end
+    end)
   end
 
-  defp normalize_runtime_error(reason) when reason in [:timeout, :rpc_timeout],
-    do: timeout_error() |> elem(1)
+  defp close_and_remove_session(gong_node, rpc_client, rpc_timeout_ms, entry, reason) do
+    safe_close_session(gong_node, entry.session_id, rpc_client, rpc_timeout_ms)
+    delete_session_entry(entry.session_key)
 
-  defp normalize_runtime_error(reason) do
-    %Error{
-      code: :runtime_error,
-      message: "runtime rpc error",
-      retryable: false,
-      context: %{reason: inspect(reason)}
-    }
+    Logger.info("gong_rpc.session.closed",
+      session_key: entry.session_key,
+      session_id: entry.session_id,
+      reason: reason
+    )
   end
 
-  defp timeout_error do
-    {:error,
-     %Error{
-       code: :timeout,
-       message: "runtime rpc timeout",
-       retryable: true,
-       context: %{}
-     }}
+  defp lock_session_key(session_key, fun) when is_function(fun, 0) do
+    :global.trans({@session_lock_prefix, session_key}, fun)
   end
 
-  defp resolve_remote_target(action, opts, config) do
-    case Keyword.get(opts, :rpc_target) || Keyword.get(config, :rpc_target, %{}) do
-      %{^action => {module, function}} ->
-        {module, function}
+  defp ensure_session_table! do
+    case :ets.whereis(@session_table) do
+      :undefined ->
+        heir_pid = Process.whereis(:init)
 
-      target when is_list(target) ->
-        case Keyword.get(target, action) do
-          {module, function} -> {module, function}
-          _ -> default_target(action)
-        end
+        table_opts = [:named_table, :set, :public, read_concurrency: true, write_concurrency: true]
+
+        table_opts =
+          if is_pid(heir_pid) do
+            table_opts ++ [{:heir, heir_pid, :transfer}]
+          else
+            table_opts
+          end
+
+        :ets.new(@session_table, table_opts)
+        :ok
 
       _ ->
-        default_target(action)
+        :ok
+    end
+  rescue
+    ArgumentError ->
+      :ok
+  end
+
+  defp lookup_session_entry(session_key) do
+    ensure_session_table!()
+
+    case :ets.lookup(@session_table, session_key) do
+      [{^session_key, session_id, session_pid, last_access_at_ms}] ->
+        {:ok,
+         %{
+           session_key: session_key,
+           session_id: session_id,
+           session_pid: session_pid,
+           last_access_at_ms: last_access_at_ms
+         }}
+
+      _ ->
+        :error
     end
   end
 
-  defp default_target(:open), do: {Gong.SessionManager, :open}
-  defp default_target(:get), do: {Gong.SessionManager, :get}
-  defp default_target(:prompt), do: {Gong.Session, :prompt}
-  defp default_target(:close), do: {Gong.Session, :close}
+  defp put_session_entry(entry) do
+    ensure_session_table!()
 
-  defp resolve_timeout(timeout_ms, opts, config) do
-    timeout_ms || Keyword.get(opts, :timeout_ms) ||
-      Keyword.get(config, :rpc_timeout_ms, @default_timeout_ms)
+    :ets.insert(@session_table, {entry.session_key, entry.session_id, entry.session_pid, entry.last_access_at_ms})
+    :ok
   end
 
-  defp normalize_runtime_id(value) when is_binary(value) and value != "", do: value
-  defp normalize_runtime_id(_), do: @default_runtime_id
+  defp touch_session_entry(session_key) do
+    ensure_session_table!()
+    :ets.update_element(@session_table, session_key, {4, now_ms()})
+    :ok
+  rescue
+    ArgumentError ->
+      :ok
+  end
 
-  defp normalize_code(code) when is_atom(code), do: code
+  defp delete_session_entry(session_key) do
+    ensure_session_table!()
+    :ets.delete(@session_table, session_key)
+    :ok
+  end
 
-  defp normalize_code(code) when is_binary(code) do
-    code
-    |> String.trim()
-    |> String.downcase()
-    |> String.replace(~r/[^a-z0-9]+/, "_")
-    |> case do
-      "timeout" -> :timeout
-      "session_not_found" -> :session_not_found
-      "transport_error" -> :transport_error
-      "runtime_error" -> :runtime_error
-      "unsupported_operation" -> :unsupported_operation
-      _ -> :runtime_error
+  defp list_session_entries do
+    ensure_session_table!()
+
+    :ets.tab2list(@session_table)
+    |> Enum.map(fn {session_key, session_id, session_pid, last_access_at_ms} ->
+      %{
+        session_key: session_key,
+        session_id: session_id,
+        session_pid: session_pid,
+        last_access_at_ms: last_access_at_ms
+      }
+    end)
+  end
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
+
+  defp should_rebuild_session?(cfg, error_payload) when is_map(error_payload) do
+    invalidation_codes = invalidation_codes(cfg)
+    code = normalize_code(Map.get(error_payload, :code))
+    message = normalize_text(Map.get(error_payload, :message))
+    reason = error_payload |> Map.get(:details, %{}) |> Map.get(:reason) |> normalize_text()
+
+    code in invalidation_codes or
+      String.contains?(message, "session_not_found") or
+      String.contains?(message, "runtime session missing") or
+      String.contains?(reason, "session_not_found") or
+      String.contains?(reason, "noproc") or
+      String.contains?(reason, "not_found")
+  end
+
+  defp should_rebuild_session?(_cfg, _error_payload), do: false
+
+  defp invalidation_codes(cfg) do
+    cfg
+    |> Keyword.get(:session_invalidation_codes, @default_invalidation_codes)
+    |> Enum.map(&normalize_code/1)
+  end
+
+  defp normalize_code(nil), do: ""
+  defp normalize_code(code) when is_atom(code), do: code |> Atom.to_string() |> String.downcase()
+  defp normalize_code(code) when is_binary(code), do: String.downcase(code)
+  defp normalize_code(code), do: code |> to_string() |> String.downcase()
+
+  defp normalize_text(nil), do: ""
+  defp normalize_text(value) when is_binary(value), do: String.downcase(value)
+  defp normalize_text(value), do: value |> to_string() |> String.downcase()
+
+  defp create_session(gong_node, rpc_client, cfg, rpc_timeout_ms, request_id, session_key, run_id) do
+    model = Keyword.get(cfg, :model, @default_model)
+    session_opts = [[model: model]]
+
+    case rpc_client.call(gong_node, Gong.SessionManager, :create_session, session_opts, rpc_timeout_ms) do
+      {:ok, pid, session_id} when is_pid(pid) and is_binary(session_id) ->
+        {:ok, pid, session_id}
+
+      {:badrpc, reason} ->
+        {:error, rpc_error_payload("RPC_CREATE_SESSION_FAILED", reason)}
+
+      other ->
+        {:error,
+         failed_payload("RPC_CREATE_SESSION_FAILED", "unexpected create_session result", %{
+           result: inspect(other),
+           request_id: request_id,
+           session_key: session_key,
+           run_id: run_id
+         })}
     end
   end
 
-  defp normalize_code(_), do: :runtime_error
+  defp subscribe_session(gong_node, session_pid, rpc_client, rpc_timeout_ms, request_id, session_key, run_id) do
+    case rpc_client.call(gong_node, Gong.Session, :subscribe, [session_pid, self()], rpc_timeout_ms) do
+      :ok ->
+        :ok
 
-  defp retryable_code?(code), do: code in [:timeout, :session_not_found, :transport_error]
+      {:badrpc, reason} ->
+        {:error, rpc_error_payload("RPC_SUBSCRIBE_FAILED", reason)}
 
-  defp normalize_payload_text(payload) when is_binary(payload), do: payload
-  defp normalize_payload_text(payload), do: to_string(payload)
-  defp normalize_metadata(metadata) when is_map(metadata), do: metadata
-  defp normalize_metadata(_), do: %{}
+      other ->
+        {:error,
+         failed_payload("RPC_SUBSCRIBE_FAILED", "unexpected subscribe result", %{
+           result: inspect(other),
+           request_id: request_id,
+           session_key: session_key,
+           run_id: run_id
+         })}
+    end
+  end
 
-  defp runtime_config, do: Application.get_env(:men, :runtime_bridge, [])
+  defp prompt_session(gong_node, session_pid, prompt, rpc_client, rpc_timeout_ms, request_id, session_key, run_id) do
+    case rpc_client.call(gong_node, Gong.Session, :prompt, [session_pid, prompt, []], rpc_timeout_ms) do
+      :ok ->
+        :ok
+
+      {:badrpc, reason} ->
+        {:error, rpc_error_payload("RPC_PROMPT_FAILED", reason)}
+
+      {:error, reason} ->
+        {:error, failed_payload("RPC_PROMPT_FAILED", "session prompt failed", %{reason: inspect(reason)})}
+
+      other ->
+        {:error,
+         failed_payload("RPC_PROMPT_FAILED", "unexpected prompt result", %{
+           result: inspect(other),
+           request_id: request_id,
+           session_key: session_key,
+           run_id: run_id
+         })}
+    end
+  end
+
+  defp await_completion(
+         gong_node,
+         session_pid,
+         rpc_client,
+         rpc_timeout_ms,
+         completion_timeout_ms,
+         request_id,
+         session_key,
+         run_id,
+         event_callback
+       ) do
+    deadline_ms = System.monotonic_time(:millisecond) + completion_timeout_ms
+
+    do_await_completion(
+      deadline_ms,
+      completion_timeout_ms,
+      nil,
+      "",
+      gong_node,
+      session_pid,
+      rpc_client,
+      rpc_timeout_ms,
+      request_id,
+      session_key,
+      run_id,
+      event_callback
+    )
+  end
+
+  defp do_await_completion(
+         deadline_ms,
+         completion_timeout_ms,
+         result_text,
+         delta_text,
+         gong_node,
+         session_pid,
+         rpc_client,
+         rpc_timeout_ms,
+         request_id,
+         session_key,
+         run_id,
+         event_callback
+       ) do
+    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:session_event, %{type: "message.delta", payload: payload}} when is_map(payload) ->
+        delta_chunk = to_string(Map.get(payload, :content, Map.get(payload, "content", "")))
+        next_delta = delta_text <> delta_chunk
+        emit_event(event_callback, %{type: :delta, payload: %{text: delta_chunk}})
+
+        do_await_completion(
+          deadline_ms,
+          completion_timeout_ms,
+          result_text,
+          next_delta,
+          gong_node,
+          session_pid,
+          rpc_client,
+          rpc_timeout_ms,
+          request_id,
+          session_key,
+          run_id,
+          event_callback
+        )
+
+      {:session_event, %{type: "tool.start", payload: payload}} when is_map(payload) ->
+        tool_name = Map.get(payload, :tool_name, Map.get(payload, "tool_name", "unknown_tool"))
+
+        emit_event(event_callback, %{
+          type: :delta,
+          payload: %{text: "", tool_name: tool_name, tool_status: "start"}
+        })
+
+        do_await_completion(
+          deadline_ms,
+          completion_timeout_ms,
+          result_text,
+          delta_text,
+          gong_node,
+          session_pid,
+          rpc_client,
+          rpc_timeout_ms,
+          request_id,
+          session_key,
+          run_id,
+          event_callback
+        )
+
+      {:session_event, %{type: "tool.end", payload: payload}} when is_map(payload) ->
+        tool_name = Map.get(payload, :tool_name, Map.get(payload, "tool_name", "unknown_tool"))
+
+        emit_event(event_callback, %{
+          type: :delta,
+          payload: %{text: "", tool_name: tool_name, tool_status: "end"}
+        })
+
+        do_await_completion(
+          deadline_ms,
+          completion_timeout_ms,
+          result_text,
+          delta_text,
+          gong_node,
+          session_pid,
+          rpc_client,
+          rpc_timeout_ms,
+          request_id,
+          session_key,
+          run_id,
+          event_callback
+        )
+
+      {:session_event, %{type: "lifecycle.result", payload: payload}} when is_map(payload) ->
+        assistant_text = Map.get(payload, :assistant_text, Map.get(payload, "assistant_text"))
+
+        next_result =
+          case assistant_text do
+            text when is_binary(text) and text != "" -> text
+            _ -> result_text
+          end
+
+        do_await_completion(
+          deadline_ms,
+          completion_timeout_ms,
+          next_result,
+          delta_text,
+          gong_node,
+          session_pid,
+          rpc_client,
+          rpc_timeout_ms,
+          request_id,
+          session_key,
+          run_id,
+          event_callback
+        )
+
+      {:session_event, %{type: "lifecycle.error", error: error}} ->
+        {:error,
+         failed_payload("RPC_LIFECYCLE_ERROR", "gong session lifecycle.error", %{
+           error: inspect(error),
+           request_id: request_id,
+           session_key: session_key,
+           run_id: run_id
+         })}
+
+      {:session_event, %{type: "lifecycle.completed"}} ->
+        text = finalize_text(result_text, delta_text)
+
+        if text == "" do
+          fetch_history_text(gong_node, session_pid, rpc_client, rpc_timeout_ms)
+        else
+          {:ok, text}
+        end
+
+      {:session_event, _other_event} ->
+        # 会话事件流中包含大量生命周期/工具事件，这些不是 completion 判定条件。
+        # 显式消费后继续等待，避免残留到上层 GenServer mailbox。
+        do_await_completion(
+          deadline_ms,
+          completion_timeout_ms,
+          result_text,
+          delta_text,
+          gong_node,
+          session_pid,
+          rpc_client,
+          rpc_timeout_ms,
+          request_id,
+          session_key,
+          run_id,
+          event_callback
+        )
+    after
+      remaining_ms ->
+        {:error,
+         %{
+           type: :timeout,
+           code: "RPC_TIMEOUT",
+           message: "gong rpc completion timed out after #{completion_timeout_ms}ms",
+           details: %{
+             waited_ms: completion_timeout_ms - max(remaining_ms, 0),
+             request_id: request_id,
+             session_key: session_key,
+             run_id: run_id
+           }
+         }}
+    end
+  end
+
+  defp fetch_history_text(gong_node, session_pid, rpc_client, rpc_timeout_ms) do
+    case rpc_client.call(gong_node, Gong.Session, :history, [session_pid], rpc_timeout_ms) do
+      {:ok, history} when is_list(history) ->
+        case rpc_client.call(gong_node, Gong.Session, :get_last_assistant_message, [history], rpc_timeout_ms) do
+          text when is_binary(text) and text != "" -> {:ok, text}
+          _ -> {:ok, ""}
+        end
+
+      {:badrpc, reason} ->
+        {:error, rpc_error_payload("RPC_HISTORY_FAILED", reason)}
+
+      other ->
+        {:error, failed_payload("RPC_HISTORY_FAILED", "unexpected history result", %{result: inspect(other)})}
+    end
+  end
+
+  defp safe_close_session(gong_node, session_id, rpc_client, rpc_timeout_ms) do
+    _ = rpc_client.call(gong_node, Gong.SessionManager, :close_session, [session_id], rpc_timeout_ms)
+    :ok
+  end
+
+  defp finalize_text(result_text, delta_text) do
+    cond do
+      is_binary(result_text) and result_text != "" -> result_text
+      is_binary(delta_text) and delta_text != "" -> delta_text
+      true -> ""
+    end
+  end
+
+  defp runtime_config do
+    Application.get_env(:men, __MODULE__, [])
+  end
+
+  defp timeout_ms(cfg, key, default) do
+    case Keyword.get(cfg, key, default) do
+      value when is_integer(value) and value > 0 -> value
+      _ -> default
+    end
+  end
+
+  defp context_value(context, key, default) do
+    context
+    |> Map.get(key, Map.get(context, Atom.to_string(key), default))
+    |> normalize_context_value(default)
+  end
+
+  defp event_callback_from_context(context) when is_map(context) do
+    callback = Map.get(context, :event_callback, Map.get(context, "event_callback"))
+    if is_function(callback, 1), do: callback, else: nil
+  end
+
+  defp event_callback_from_context(_), do: nil
+
+  defp emit_event(nil, _event), do: :ok
+
+  defp emit_event(callback, event) when is_function(callback, 1) do
+    try do
+      callback.(event)
+    rescue
+      _ -> :ok
+    end
+  end
+
+  defp normalize_context_value(nil, default), do: default
+  defp normalize_context_value("", default), do: default
+  defp normalize_context_value(value, _default) when is_binary(value), do: value
+  defp normalize_context_value(value, _default), do: to_string(value)
+
+  defp generate_run_id do
+    "run_" <> Integer.to_string(System.unique_integer([:positive, :monotonic]), 16)
+  end
+
+  defp default_context(request_id, session_key, run_id) do
+    %{
+      request_id: request_id,
+      session_key: session_key,
+      run_id: run_id
+    }
+  end
+
+  defp rpc_error_payload(code, reason) do
+    failed_payload(code, "rpc call failed", %{reason: inspect(reason)})
+  end
+
+  defp failed_payload(code, message, details) do
+    %{
+      type: :failed,
+      code: code,
+      message: message,
+      details: details
+    }
+  end
 end

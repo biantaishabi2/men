@@ -64,12 +64,8 @@ defmodule Men.Gateway.SessionCoordinatorTest do
       "runtime-" <> Integer.to_string(id)
     end
 
-    assert {:ok, runtime_session_id_1} =
-             SessionCoordinator.get_or_create(name, "session-A", create_fun)
-
-    assert {:ok, runtime_session_id_2} =
-             SessionCoordinator.get_or_create(name, "session-A", create_fun)
-
+    assert {:ok, runtime_session_id_1} = SessionCoordinator.get_or_create(name, "session-A", create_fun)
+    assert {:ok, runtime_session_id_2} = SessionCoordinator.get_or_create(name, "session-A", create_fun)
     assert runtime_session_id_1 == runtime_session_id_2
     assert :atomics.get(counter, 1) == 1
   end
@@ -79,19 +75,11 @@ defmodule Men.Gateway.SessionCoordinatorTest do
 
     tasks =
       for key <- ["session-A", "session-B", "session-C"] do
-        Task.async(fn ->
-          SessionCoordinator.get_or_create(name, key, fn -> "runtime-" <> key end)
-        end)
+        Task.async(fn -> SessionCoordinator.get_or_create(name, key, fn -> "runtime-" <> key end) end)
       end
 
     results = Enum.map(tasks, &Task.await(&1, 2_000))
-
-    assert Enum.sort(results) ==
-             Enum.sort([
-               {:ok, "runtime-session-A"},
-               {:ok, "runtime-session-B"},
-               {:ok, "runtime-session-C"}
-             ])
+    assert Enum.sort(results) == Enum.sort([{:ok, "runtime-session-A"}, {:ok, "runtime-session-B"}, {:ok, "runtime-session-C"}])
   end
 
   test "TTL 超时后重建 runtime_session_id" do
@@ -175,8 +163,7 @@ defmodule Men.Gateway.SessionCoordinatorTest do
   test "非白名单错误码返回 ignored 且不删除映射" do
     {name, _pid} = start_coordinator()
 
-    assert {:ok, "runtime-A"} =
-             SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A" end)
+    assert {:ok, "runtime-A"} = SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A" end)
 
     assert :ignored =
              SessionCoordinator.invalidate_by_runtime_session_id(name, %{
@@ -184,36 +171,22 @@ defmodule Men.Gateway.SessionCoordinatorTest do
                code: :some_other_error
              })
 
-    assert {:ok, "runtime-A"} =
-             SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A-new" end)
+    assert {:ok, "runtime-A"} = SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A-new" end)
   end
 
   test "达到容量后按 LRU 淘汰最旧 last_access_at" do
     {name, _pid} = start_coordinator(max_entries: 2)
 
-    assert {:ok, "runtime-A"} =
-             SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A" end)
-
+    assert {:ok, "runtime-A"} = SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A" end)
     Process.sleep(2)
-
-    assert {:ok, "runtime-B"} =
-             SessionCoordinator.get_or_create(name, "session-B", fn -> "runtime-B" end)
-
+    assert {:ok, "runtime-B"} = SessionCoordinator.get_or_create(name, "session-B", fn -> "runtime-B" end)
     Process.sleep(2)
-
-    assert {:ok, "runtime-A"} =
-             SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A-new" end)
-
+    assert {:ok, "runtime-A"} = SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A-new" end)
     Process.sleep(2)
+    assert {:ok, "runtime-C"} = SessionCoordinator.get_or_create(name, "session-C", fn -> "runtime-C" end)
 
-    assert {:ok, "runtime-C"} =
-             SessionCoordinator.get_or_create(name, "session-C", fn -> "runtime-C" end)
-
-    assert {:ok, "runtime-A"} =
-             SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A-new-2" end)
-
-    assert {:ok, "runtime-B-new"} =
-             SessionCoordinator.get_or_create(name, "session-B", fn -> "runtime-B-new" end)
+    assert {:ok, "runtime-A"} = SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A-new-2" end)
+    assert {:ok, "runtime-B-new"} = SessionCoordinator.get_or_create(name, "session-B", fn -> "runtime-B-new" end)
   end
 
   test "同 key 并发安全：create_fun 只执行一次" do
@@ -249,24 +222,14 @@ defmodule Men.Gateway.SessionCoordinatorTest do
   test "invalidate 传入非法 reason 时返回 ignored 且不删除映射" do
     {name, _pid} = start_coordinator()
 
-    assert {:ok, "runtime-A"} =
-             SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A" end)
+    assert {:ok, "runtime-A"} = SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A" end)
+    assert {:ok, "runtime-B"} = SessionCoordinator.get_or_create(name, "session-B", fn -> "runtime-B" end)
 
-    assert {:ok, "runtime-B"} =
-             SessionCoordinator.get_or_create(name, "session-B", fn -> "runtime-B" end)
-
-    assert :ignored =
-             SessionCoordinator.invalidate_by_runtime_session_id(name, %{
-               code: :runtime_session_not_found
-             })
-
+    assert :ignored = SessionCoordinator.invalidate_by_runtime_session_id(name, %{code: :runtime_session_not_found})
     assert :ignored = SessionCoordinator.invalidate_by_session_key(name, {:bad_reason})
 
-    assert {:ok, "runtime-A"} =
-             SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A-new" end)
-
-    assert {:ok, "runtime-B"} =
-             SessionCoordinator.get_or_create(name, "session-B", fn -> "runtime-B-new" end)
+    assert {:ok, "runtime-A"} = SessionCoordinator.get_or_create(name, "session-A", fn -> "runtime-A-new" end)
+    assert {:ok, "runtime-B"} = SessionCoordinator.get_or_create(name, "session-B", fn -> "runtime-B-new" end)
   end
 
   test "coordinator 关闭时 dispatch 回退到一次一会话策略" do

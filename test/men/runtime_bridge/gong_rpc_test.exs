@@ -1,301 +1,349 @@
 defmodule Men.RuntimeBridge.GongRPCTest do
   use ExUnit.Case, async: false
 
-  alias Men.RuntimeBridge.{Error, GongRPC, Request, Response}
+  alias Men.RuntimeBridge.GongRPC
 
-  defmodule FakeRPC do
-    def call(node_name, remote_module, remote_function, [payload], timeout_ms) do
-      if pid = Application.get_env(:men, :gong_rpc_test_pid) do
-        send(pid, {:rpc_called, node_name, remote_module, remote_function, payload, timeout_ms})
+  defmodule MockNodeConnector do
+    def ensure_connected(_cfg, _rpc_client) do
+      case Application.get_env(:men, :gong_rpc_test_connector_mode, :ok) do
+        :ok ->
+          {:ok, :"gong@127.0.0.1"}
+
+        :error ->
+          {:error,
+           %{type: :failed, code: "NODE_DISCONNECTED", message: "node down", details: %{}}}
       end
-
-      apply(remote_module, remote_function, [payload])
     end
   end
 
-  defmodule FakeRemote do
-    def open(payload) do
-      {:ok,
-       %{
-         runtime_id: payload.runtime_id,
-         session_id: payload.session_id || "sess-opened",
-         payload: %{status: :opened},
-         metadata: %{source: :fake_remote}
-       }}
+  defmodule MockRPCClient do
+    def call(_node, Gong.SessionManager, :create_session, _args, _timeout) do
+      mode = Application.get_env(:men, :gong_rpc_test_mode, :success)
+      notify({:rpc_create_session, mode})
+
+      if mode == :create_badrpc do
+        {:badrpc, :nodedown}
+      else
+        session_id =
+          "session_" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+
+        pid = spawn(fn -> Process.sleep(:infinity) end)
+        :ok = register_session(pid, session_id)
+        {:ok, pid, session_id}
+      end
     end
 
-    def get(payload) do
-      {:ok,
-       %{
-         runtime_id: payload.runtime_id,
-         session_id: payload.session_id,
-         payload: %{status: :active},
-         metadata: %{source: :fake_remote}
-       }}
+    def call(_node, Gong.Session, :subscribe, [_pid, _subscriber], _timeout), do: :ok
+
+    def call(_node, Gong.Session, :prompt, [pid, _prompt, _opts], _timeout) do
+      mode = Application.get_env(:men, :gong_rpc_test_mode, :success)
+      notify({:rpc_prompt, pid, mode})
+
+      case mode do
+        :success ->
+          send(
+            self(),
+            {:session_event, %{type: "lifecycle.result", payload: %{assistant_text: "rpc ok"}}}
+          )
+
+          send(self(), {:session_event, %{type: "lifecycle.completed"}})
+          :ok
+
+        :with_delta ->
+          send(self(), {:session_event, %{type: "message.delta", payload: %{content: "part-1"}}})
+          send(self(), {:session_event, %{type: "message.delta", payload: %{content: "part-2"}}})
+
+          send(
+            self(),
+            {:session_event, %{type: "lifecycle.result", payload: %{assistant_text: "rpc ok"}}}
+          )
+
+          send(self(), {:session_event, %{type: "lifecycle.completed"}})
+          :ok
+
+        :with_noise_events ->
+          send(self(), {:session_event, %{type: "lifecycle.received", payload: %{}}})
+          send(self(), {:session_event, %{type: "message.start", payload: %{}}})
+
+          send(
+            self(),
+            {:session_event, %{type: "tool.start", payload: %{tool_name: "list_directory"}}}
+          )
+
+          send(self(), {:session_event, %{type: "message.delta", payload: %{content: "part-a"}}})
+
+          send(
+            self(),
+            {:session_event, %{type: "tool.end", payload: %{tool_name: "list_directory"}}}
+          )
+
+          send(self(), {:session_event, %{type: "message.end", payload: %{}}})
+
+          send(
+            self(),
+            {:session_event,
+             %{type: "lifecycle.result", payload: %{assistant_text: "rpc noisy ok"}}}
+          )
+
+          send(self(), {:session_event, %{type: "lifecycle.completed"}})
+          :ok
+
+        :session_not_found_once ->
+          mark = :prompt_once_global
+          count = Process.get(mark, 0) + 1
+          Process.put(mark, count)
+
+          if count == 1 do
+            {:error, :session_not_found}
+          else
+            send(
+              self(),
+              {:session_event,
+               %{type: "lifecycle.result", payload: %{assistant_text: "rpc rebuilt"}}}
+            )
+
+            send(self(), {:session_event, %{type: "lifecycle.completed"}})
+            :ok
+          end
+
+        :lifecycle_error ->
+          send(self(), {:session_event, %{type: "lifecycle.error", error: %{message: "broken"}}})
+          :ok
+
+        :timeout ->
+          :ok
+
+        _ ->
+          :ok
+      end
     end
 
-    def prompt(%{payload: "rpc_timeout"}), do: {:badrpc, :timeout}
-    def prompt(%{payload: "transport_error"}), do: {:badrpc, :nodedown}
-
-    def prompt(%{payload: "rpc_error"}) do
-      {:error,
-       %{
-         code: :runtime_error,
-         message: "remote failed",
-         retryable: false,
-         context: %{source: :fake_remote}
-       }}
+    def call(_node, Gong.SessionManager, :close_session, [session_id], _timeout) do
+      notify({:rpc_close_session, session_id})
+      :ok
     end
 
-    def prompt(%{payload: "nil_metadata"} = payload) do
-      {:ok,
-       %{
-         runtime_id: payload.runtime_id,
-         session_id: payload.session_id,
-         payload: "reply:nil-metadata",
-         metadata: nil
-       }}
+    def call(_node, Gong.Session, :history, [_pid], _timeout),
+      do: {:ok, [%{role: :assistant, content: "history text"}]}
+
+    def call(_node, Gong.Session, :get_last_assistant_message, [history], _timeout) do
+      case history do
+        [%{content: text} | _] -> text
+        _ -> ""
+      end
     end
 
-    def prompt(%{payload: "unknown_code"}),
-      do: {:error, %{"code" => "NEW_REMOTE_ERROR", "message" => "new"}}
+    def ping(_node), do: :pong
 
-    def prompt(%{session_id: "missing"}) do
-      {:error,
-       %{
-         code: :session_not_found,
-         message: "runtime session not found",
-         retryable: true,
-         context: %{session_id: "missing"}
-       }}
+    defp register_session(pid, session_id) do
+      sessions = Application.get_env(:men, :gong_rpc_test_sessions, %{})
+      Application.put_env(:men, :gong_rpc_test_sessions, Map.put(sessions, pid, session_id))
+      :ok
     end
 
-    def prompt(%{payload: %{deep: _} = deep_payload} = payload) do
-      {:ok,
-       %{
-         runtime_id: payload.runtime_id,
-         session_id: payload.session_id,
-         payload: deep_payload,
-         metadata: %{source: :fake_remote}
-       }}
-    end
+    defp notify(message) do
+      if pid = Application.get_env(:men, :gong_rpc_test_pid) do
+        send(pid, message)
+      end
 
-    def prompt(payload) do
-      {:ok,
-       %{
-         runtime_id: payload.runtime_id,
-         session_id: payload.session_id,
-         payload: "reply:" <> to_string(payload.payload),
-         metadata: %{source: :fake_remote}
-       }}
-    end
-
-    def close(%{session_id: "missing"}) do
-      {:error,
-       %{
-         code: :session_not_found,
-         message: "runtime session not found",
-         retryable: true,
-         context: %{session_id: "missing"}
-       }}
-    end
-
-    def close(payload) do
-      {:ok,
-       %{
-         runtime_id: payload.runtime_id,
-         session_id: payload.session_id,
-         payload: :closed,
-         metadata: %{source: :fake_remote}
-       }}
+      :ok
     end
   end
 
   setup do
-    original_runtime_bridge = Application.get_env(:men, :runtime_bridge, [])
+    original = Application.get_env(:men, GongRPC, [])
+    :ok = GongRPC.__reset_session_registry_for_test__()
 
-    Application.put_env(:men, :gong_rpc_test_pid, self())
-
-    Application.put_env(
-      :men,
-      :runtime_bridge,
-      original_runtime_bridge
-      |> Keyword.put(:rpc_module, FakeRPC)
-      |> Keyword.put(:gong_node, :gong@test)
-      |> Keyword.put(:rpc_timeout_ms, 120)
-      |> Keyword.put(:rpc_target, %{
-        open: {FakeRemote, :open},
-        get: {FakeRemote, :get},
-        prompt: {FakeRemote, :prompt},
-        close: {FakeRemote, :close}
-      })
+    Application.put_env(:men, GongRPC,
+      rpc_client: MockRPCClient,
+      node_connector: MockNodeConnector,
+      rpc_timeout_ms: 200,
+      completion_timeout_ms: 300,
+      model: "deepseek:deepseek-chat",
+      session_cleanup_interval_ms: 1,
+      session_idle_ttl_ms: 10_000,
+      max_session_entries: 1_000
     )
 
+    Application.put_env(:men, :gong_rpc_test_pid, self())
+    Application.put_env(:men, :gong_rpc_test_mode, :success)
+    Application.put_env(:men, :gong_rpc_test_connector_mode, :ok)
+    Application.put_env(:men, :gong_rpc_test_sessions, %{})
+
     on_exit(fn ->
-      Application.put_env(:men, :runtime_bridge, original_runtime_bridge)
+      Application.put_env(:men, GongRPC, original)
+      Application.delete_env(:men, :gong_rpc_test_mode)
+      Application.delete_env(:men, :gong_rpc_test_connector_mode)
       Application.delete_env(:men, :gong_rpc_test_pid)
+      Application.delete_env(:men, :gong_rpc_test_sessions)
+      :ok = GongRPC.__reset_session_registry_for_test__()
     end)
 
     :ok
   end
 
-  test "正常 RPC 路径 open -> prompt -> close 返回新契约结构" do
-    open_request = %Request{runtime_id: "gong", session_id: nil, payload: %{mode: :new}}
-    prompt_request = %Request{runtime_id: "gong", session_id: "sess-1", payload: "hello"}
-    close_request = %Request{runtime_id: "gong", session_id: "sess-1", payload: nil}
+  test "RPC 正常链路返回统一成功结构" do
+    assert {:ok, payload} =
+             GongRPC.start_turn("hello", %{
+               request_id: "req-rpc-1",
+               session_key: "dingtalk:u1",
+               run_id: "run-rpc-1"
+             })
 
-    assert {:ok, %Response{} = open_response} = GongRPC.open(open_request)
-    assert open_response.payload == %{status: :opened}
-
-    assert {:ok, %Response{} = prompt_response} = GongRPC.prompt(prompt_request)
-    assert prompt_response.payload == "reply:hello"
-
-    assert {:ok, %Response{} = close_response} = GongRPC.close(close_request)
-    assert close_response.payload == :closed
-
-    assert_receive {:rpc_called, :gong@test, FakeRemote, :open, _, 120}
-    assert_receive {:rpc_called, :gong@test, FakeRemote, :prompt, _, 120}
-    assert_receive {:rpc_called, :gong@test, FakeRemote, :close, _, 120}
+    assert payload.text == "rpc ok"
+    assert payload.meta.request_id == "req-rpc-1"
+    assert payload.meta.session_key == "dingtalk:u1"
+    assert payload.meta.run_id == "run-rpc-1"
+    assert payload.meta.transport == "rpc"
   end
 
-  test "session_not_found 映射为 retryable=true 的统一错误" do
-    request = %Request{runtime_id: "gong", session_id: "missing", payload: "hello"}
+  test "同一 session_key 连续请求会复用会话，不会每轮关闭" do
+    assert {:ok, _} =
+             GongRPC.start_turn("hello-1", %{
+               request_id: "req-rpc-reuse-1",
+               session_key: "dingtalk:reuse",
+               run_id: "run-1"
+             })
 
-    assert {:error, %Error{} = error} = GongRPC.prompt(request)
-    assert error.code == :session_not_found
-    assert error.retryable == true
-    assert error.context == %{session_id: "missing"}
+    assert {:ok, _} =
+             GongRPC.start_turn("hello-2", %{
+               request_id: "req-rpc-reuse-2",
+               session_key: "dingtalk:reuse",
+               run_id: "run-2"
+             })
+
+    assert_receive {:rpc_create_session, :success}
+    refute_receive {:rpc_create_session, :success}
+    refute_receive {:rpc_close_session, _}
   end
 
-  test "RPC 超时映射为 timeout 且不泄漏底层格式" do
-    request = %Request{
-      runtime_id: "gong",
-      session_id: "sess-timeout",
-      payload: "rpc_timeout",
-      timeout_ms: 50
-    }
-
-    assert {:error, %Error{} = error} = GongRPC.prompt(request)
-    assert error.code == :timeout
-    assert error.retryable == true
-    refute String.contains?(error.message, "badrpc")
-  end
-
-  test "传输错误与运行时错误映射稳定" do
-    transport_request = %Request{
-      runtime_id: "gong",
-      session_id: "sess-transport",
-      payload: "transport_error"
-    }
-
-    runtime_request = %Request{
-      runtime_id: "gong",
-      session_id: "sess-runtime",
-      payload: "rpc_error"
-    }
-
-    assert {:error, %Error{} = transport_error} = GongRPC.prompt(transport_request)
-    assert transport_error.code == :transport_error
-    assert transport_error.retryable == true
-
-    assert {:error, %Error{} = runtime_error} = GongRPC.prompt(runtime_request)
-    assert runtime_error.code == :runtime_error
-    assert runtime_error.retryable == false
-  end
-
-  test "close 对 session_not_found 幂等处理" do
-    request = %Request{runtime_id: "gong", session_id: "missing", payload: nil}
-
-    assert {:ok, %Response{} = response} = GongRPC.close(request)
-    assert response.payload == :closed
-    assert response.metadata.idempotent == true
-  end
-
-  test "调用进程重启边界下行为一致，不依赖进程内会话状态" do
-    request = %Request{runtime_id: "gong", session_id: "sess-restart", payload: "hello"}
-
-    assert {:ok, %Response{} = first_result} = invoke_in_worker(request)
-    assert {:ok, %Response{} = second_result} = invoke_in_worker(request)
-
-    assert first_result.payload == "reply:hello"
-    assert second_result.payload == "reply:hello"
-
-    assert_receive {:rpc_called, :gong@test, FakeRemote, :prompt, %{session_id: "sess-restart"},
-                    120}
-
-    assert_receive {:rpc_called, :gong@test, FakeRemote, :prompt, %{session_id: "sess-restart"},
-                    120}
-  end
-
-  defp invoke_in_worker(request) do
+  test "传入 event_callback 时会实时收到 delta 事件" do
+    Application.put_env(:men, :gong_rpc_test_mode, :with_delta)
     parent = self()
 
-    pid =
-      spawn(fn ->
-        send(parent, {:worker_result, GongRPC.prompt(request)})
-      end)
+    callback = fn event -> send(parent, {:stream_event, event}) end
 
-    assert_receive {:worker_result, result}, 1_000
+    assert {:ok, payload} =
+             GongRPC.start_turn("hello-delta", %{
+               request_id: "req-rpc-delta-1",
+               session_key: "dingtalk:delta",
+               run_id: "run-rpc-delta-1",
+               event_callback: callback
+             })
 
-    if Process.alive?(pid) do
-      Process.exit(pid, :kill)
-    end
-
-    result
+    assert payload.text == "rpc ok"
+    assert_receive {:stream_event, %{type: :delta, payload: %{text: "part-1"}}}
+    assert_receive {:stream_event, %{type: :delta, payload: %{text: "part-2"}}}
   end
 
-  test "同一 session 并发调用行为稳定" do
-    request = %Request{runtime_id: "gong", session_id: "sess-concurrent", payload: "parallel"}
+  test "混合生命周期噪音事件时仍可完成，并返回正确文本" do
+    Application.put_env(:men, :gong_rpc_test_mode, :with_noise_events)
 
-    results =
-      1..12
-      |> Task.async_stream(fn _ -> GongRPC.prompt(request) end,
-        timeout: 1_000,
-        max_concurrency: 12
-      )
-      |> Enum.to_list()
+    assert {:ok, payload} =
+             GongRPC.start_turn("hello-noise", %{
+               request_id: "req-rpc-noise-1",
+               session_key: "dingtalk:noise",
+               run_id: "run-rpc-noise-1"
+             })
 
-    assert Enum.all?(results, fn
-             {:ok, {:ok, %Response{payload: "reply:parallel"}}} -> true
-             _ -> false
-           end)
-
-    for _ <- 1..12 do
-      assert_receive {:rpc_called, :gong@test, FakeRemote, :prompt,
-                      %{session_id: "sess-concurrent"}, 120}
-    end
+    assert payload.text == "rpc noisy ok"
   end
 
-  test "start_turn 遇到 metadata=nil 时不崩溃并回填 meta" do
-    assert {:ok, %{text: "reply:nil-metadata", meta: meta}} =
-             GongRPC.start_turn("nil_metadata", %{session_key: "sess-meta", runtime_id: "gong"})
+  test "tool.start/tool.end 会映射为结构化 delta 回调（供卡片状态消费）" do
+    Application.put_env(:men, :gong_rpc_test_mode, :with_noise_events)
+    parent = self()
+    callback = fn event -> send(parent, {:stream_event, event}) end
 
-    assert meta.runtime_id == "gong"
-    assert meta.session_key == "sess-meta"
+    assert {:ok, payload} =
+             GongRPC.start_turn("hello-noise-tool", %{
+               request_id: "req-rpc-noise-tool-1",
+               session_key: "dingtalk:noise-tool",
+               run_id: "run-rpc-noise-tool-1",
+               event_callback: callback
+             })
+
+    assert payload.text == "rpc noisy ok"
+
+    assert_receive {:stream_event,
+                    %{
+                      type: :delta,
+                      payload: %{text: "", tool_name: "list_directory", tool_status: "start"}
+                    }}
+
+    assert_receive {:stream_event, %{type: :delta, payload: %{text: "part-a"}}}
+
+    assert_receive {:stream_event,
+                    %{
+                      type: :delta,
+                      payload: %{text: "", tool_name: "list_directory", tool_status: "end"}
+                    }}
+
+    refute_receive {:stream_event,
+                    %{type: :delta, payload: %{text: "\n[tool:start] list_directory\n"}}}
   end
 
-  test "nil 与极值边界以及深层 payload 可稳定处理" do
-    nil_request = %Request{
-      runtime_id: "gong",
-      session_id: "sess-nil",
-      payload: nil,
-      timeout_ms: 0
-    }
+  test "会话失效时触发关闭并重建" do
+    Application.put_env(:men, :gong_rpc_test_mode, :session_not_found_once)
 
-    deep_payload = %{deep: %{level1: %{level2: [1, 2, %{k: "v"}]}}}
-    deep_request = %Request{runtime_id: "gong", session_id: "sess-deep", payload: deep_payload}
+    assert {:ok, payload} =
+             GongRPC.start_turn("hello-rebuild", %{
+               request_id: "req-rpc-rebuild-1",
+               session_key: "dingtalk:rebuild",
+               run_id: "run-rpc-rebuild-1"
+             })
 
-    assert {:ok, %Response{payload: "reply:"}} = GongRPC.prompt(nil_request)
-    assert_receive {:rpc_called, :gong@test, FakeRemote, :prompt, %{timeout_ms: 0}, 0}
-
-    assert {:ok, %Response{payload: ^deep_payload}} = GongRPC.prompt(deep_request)
+    assert payload.text == "rpc rebuilt"
+    assert_receive {:rpc_create_session, :session_not_found_once}
+    assert_receive {:rpc_close_session, _}
+    assert_receive {:rpc_create_session, :session_not_found_once}
   end
 
-  test "未知字符串错误码降级为 runtime_error，避免动态 atom" do
-    request = %Request{runtime_id: "gong", session_id: "sess-unknown", payload: "unknown_code"}
+  test "lifecycle.error 映射为 bridge 失败结构" do
+    Application.put_env(:men, :gong_rpc_test_mode, :lifecycle_error)
 
-    assert {:error, %Error{} = error} = GongRPC.prompt(request)
-    assert error.code == :runtime_error
-    assert error.message == "new"
+    assert {:error, error} =
+             GongRPC.start_turn("hello", %{
+               request_id: "req-rpc-2",
+               session_key: "dingtalk:u2",
+               run_id: "run-rpc-2"
+             })
+
+    assert error.type == :failed
+    assert error.code == "RPC_LIFECYCLE_ERROR"
+    assert error.request_id == "req-rpc-2"
+  end
+
+  test "节点不可用时返回 NODE_DISCONNECTED" do
+    Application.put_env(:men, :gong_rpc_test_connector_mode, :error)
+
+    assert {:error, error} =
+             GongRPC.start_turn("hello", %{
+               request_id: "req-rpc-3",
+               session_key: "dingtalk:u3",
+               run_id: "run-rpc-3"
+             })
+
+    assert error.code == "NODE_DISCONNECTED"
+    assert error.type == :failed
+  end
+
+  test "等待 completion 超时返回 RPC_TIMEOUT" do
+    Application.put_env(:men, :gong_rpc_test_mode, :timeout)
+
+    Application.put_env(
+      :men,
+      GongRPC,
+      Application.get_env(:men, GongRPC, []) |> Keyword.put(:completion_timeout_ms, 60)
+    )
+
+    assert {:error, error} =
+             GongRPC.start_turn("hello", %{
+               request_id: "req-rpc-4",
+               session_key: "dingtalk:u4",
+               run_id: "run-rpc-4"
+             })
+
+    assert error.type == :timeout
+    assert error.code == "RPC_TIMEOUT"
   end
 end
