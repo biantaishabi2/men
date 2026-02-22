@@ -235,14 +235,29 @@ defmodule Men.Gateway.DispatchServer do
         envelope.inbox_only == false
 
     if enabled? do
-      do_trigger_rebuild(state, envelope)
+      case do_trigger_rebuild(state, envelope) do
+        :ok ->
+          emit_telemetry([:dispatch, :rebuild_triggered], %{
+            event_id: envelope.event_id,
+            type: envelope.type
+          })
 
-      emit_telemetry([:dispatch, :rebuild_triggered], %{
-        event_id: envelope.event_id,
-        type: envelope.type
-      })
+          true
 
-      true
+        {:error, reason} ->
+          emit_telemetry([:dispatch, :rebuild_skipped], %{
+            event_id: envelope.event_id,
+            type: envelope.type,
+            store_result: :ok,
+            wake: envelope.wake,
+            inbox_only: envelope.inbox_only,
+            event_coordination_enabled: state.event_coordination_enabled,
+            wake_enabled: state.wake_enabled,
+            trigger_error: inspect(reason)
+          })
+
+          false
+      end
     else
       emit_telemetry([:dispatch, :rebuild_skipped], %{
         event_id: envelope.event_id,
@@ -285,14 +300,14 @@ defmodule Men.Gateway.DispatchServer do
   rescue
     error ->
       Logger.warning("gateway.dispatch rebuild trigger failed error=#{inspect(error)}")
-      :ok
+      {:error, {:exception, error}}
   catch
     kind, reason ->
       Logger.warning(
         "gateway.dispatch rebuild trigger failed kind=#{inspect(kind)} reason=#{inspect(reason)}"
       )
 
-      :ok
+      {:error, {kind, reason}}
   end
 
   defp emit_telemetry(path, metadata) when is_list(path) and is_map(metadata) do

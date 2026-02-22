@@ -19,10 +19,9 @@ defmodule Men.Gateway.InboxStore do
 
   def put(%EventEnvelope{} = envelope, opts) do
     options = normalize_opts(opts)
-    event_table = ensure_table(Map.get(options, :event_table, @default_event_table))
-    scope_table = ensure_table(Map.get(options, :scope_table, @default_scope_table))
-
-    with :ok <- validate_envelope(envelope) do
+    with {:ok, event_table} <- ensure_table(Map.get(options, :event_table, @default_event_table)),
+         {:ok, scope_table} <- ensure_table(Map.get(options, :scope_table, @default_scope_table)),
+         :ok <- validate_envelope(envelope) do
       case :ets.insert_new(event_table, {envelope.event_id, envelope.ts}) do
         true ->
           case upsert_latest(scope_table, scope_key(envelope.ets_keys), envelope) do
@@ -33,6 +32,8 @@ defmodule Men.Gateway.InboxStore do
         false ->
           {:duplicate, envelope}
       end
+    else
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -42,23 +43,32 @@ defmodule Men.Gateway.InboxStore do
           {:ok, EventEnvelope.t()} | :not_found
   def latest_by_ets_keys(ets_keys, opts \\ []) when is_list(ets_keys) do
     options = normalize_opts(opts)
-    scope_table = ensure_table(Map.get(options, :scope_table, @default_scope_table))
     key = scope_key(ets_keys)
 
-    case :ets.lookup(scope_table, key) do
-      [{^key, _version, envelope}] -> {:ok, envelope}
-      _ -> :not_found
+    case ensure_table(Map.get(options, :scope_table, @default_scope_table)) do
+      {:ok, scope_table} ->
+        case :ets.lookup(scope_table, key) do
+          [{^key, _version, envelope}] -> {:ok, envelope}
+          _ -> :not_found
+        end
+
+      {:error, _reason} ->
+        :not_found
     end
   end
 
   @spec reset(keyword() | map()) :: :ok
   def reset(opts \\ []) do
     options = normalize_opts(opts)
-    event_table = ensure_table(Map.get(options, :event_table, @default_event_table))
-    scope_table = ensure_table(Map.get(options, :scope_table, @default_scope_table))
-    :ets.delete_all_objects(event_table)
-    :ets.delete_all_objects(scope_table)
-    :ok
+
+    with {:ok, event_table} <- ensure_table(Map.get(options, :event_table, @default_event_table)),
+         {:ok, scope_table} <- ensure_table(Map.get(options, :scope_table, @default_scope_table)) do
+      :ets.delete_all_objects(event_table)
+      :ets.delete_all_objects(scope_table)
+      :ok
+    else
+      {:error, _reason} -> :ok
+    end
   end
 
   # 同一个 scope_key 的版本推进采用全局锁，避免并发覆盖高版本。
@@ -82,7 +92,7 @@ defmodule Men.Gateway.InboxStore do
   defp scope_key(ets_keys) when is_list(ets_keys) do
     ets_keys
     |> Enum.map(&to_string/1)
-    |> Enum.join("|")
+    |> List.to_tuple()
   end
 
   defp validate_envelope(%EventEnvelope{event_id: event_id, ets_keys: ets_keys, version: version})
@@ -93,20 +103,22 @@ defmodule Men.Gateway.InboxStore do
   defp validate_envelope(_), do: {:error, :invalid_event_envelope}
 
   defp ensure_table(table_name) when is_atom(table_name) do
-    case :ets.whereis(table_name) do
-      :undefined ->
-        :ets.new(table_name, [
-          :set,
-          :public,
-          :named_table,
-          read_concurrency: true,
-          write_concurrency: true
-        ])
+    try do
+      :ets.new(table_name, [
+        :set,
+        :public,
+        :named_table,
+        read_concurrency: true,
+        write_concurrency: true
+      ])
 
-        table_name
-
-      tid when is_reference(tid) ->
-        table_name
+      {:ok, table_name}
+    rescue
+      ArgumentError ->
+        case :ets.whereis(table_name) do
+          :undefined -> {:error, :ets_table_init_race}
+          _tid -> {:ok, table_name}
+        end
     end
   end
 
