@@ -7,7 +7,8 @@ defmodule Men.RuntimeBridge.Bridge do
   - `start_turn/2`: GongCLI 统一语义契约（运行时桥接）
   """
 
-  alias Men.RuntimeBridge.{ErrorResponse, Request, Response}
+  alias Men.RuntimeBridge.{ErrorResponse, Request, Response, TaskctlAdapter}
+  alias Men.Gateway.Runtime.GraphContract
 
   @type error_type :: :failed | :timeout | :overloaded
 
@@ -42,4 +43,17 @@ defmodule Men.RuntimeBridge.Bridge do
               {:ok, success_payload()} | {:error, error_payload()}
 
   @optional_callbacks call: 2, start_turn: 2
+
+  @spec graph(GraphContract.action() | String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, ErrorResponse.t()}
+  def graph(action, payload, opts \\ []) do
+    graph_adapter = opts[:graph_adapter] || config(:graph_adapter, TaskctlAdapter)
+    graph_adapter.run(action, payload, opts)
+  end
+
+  defp config(key, default) do
+    :men
+    |> Application.get_env(:runtime_bridge, [])
+    |> Keyword.get(key, default)
+  end
 end
