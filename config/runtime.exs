@@ -101,8 +101,21 @@ config :men, Men.Gateway.SessionCoordinator,
 config :men, Men.Gateway.DispatchServer, bridge_adapter: runtime_bridge_impl
 
 config :men, :zcpg_cutover,
-  enabled: parse_boolean_env.("ZCPG_CUTOVER_ENABLED", false),
-  tenant_whitelist: parse_string_list_env.("ZCPG_CUTOVER_TENANT_WHITELIST", []),
+qiwei_cutover_enabled =
+  parse_boolean_env.(
+    "QIWEI_CUTOVER_ENABLED",
+    parse_boolean_env.("ZCPG_CUTOVER_ENABLED", false)
+  )
+
+qiwei_cutover_whitelist =
+  parse_string_list_env.(
+    "QIWEI_CUTOVER_TENANT_WHITELIST",
+    parse_string_list_env.("ZCPG_CUTOVER_TENANT_WHITELIST", [])
+  )
+
+config :men, :zcpg_cutover,
+  enabled: qiwei_cutover_enabled,
+  tenant_whitelist: qiwei_cutover_whitelist,
   env_override: parse_boolean_env.("ZCPG_CUTOVER_ENV_OVERRIDE", false),
   timeout_ms: parse_positive_integer_env.("ZCPG_CUTOVER_TIMEOUT_MS", 8_000),
   breaker: [
@@ -111,6 +124,19 @@ config :men, :zcpg_cutover,
     cooldown_seconds: parse_positive_integer_env.("ZCPG_CUTOVER_BREAKER_COOLDOWN_SECONDS", 60)
   ]
 
+config :men, :qiwei,
+  callback_enabled: parse_boolean_env.("QIWEI_CALLBACK_ENABLED", false),
+  token: System.get_env("QIWEI_CALLBACK_TOKEN"),
+  encoding_aes_key: System.get_env("QIWEI_CALLBACK_ENCODING_AES_KEY"),
+  corp_id: System.get_env("QIWEI_CORP_ID"),
+  bot_user_id: System.get_env("QIWEI_BOT_USER_ID"),
+  bot_name: System.get_env("QIWEI_BOT_NAME"),
+  reply_require_mention: parse_boolean_env.("QIWEI_REPLY_REQUIRE_MENTION", true),
+  reply_max_chars: parse_positive_integer_env.("QIWEI_REPLY_MAX_CHARS", 600),
+  callback_timeout_ms: parse_positive_integer_env.("QIWEI_CALLBACK_TIMEOUT_MS", 4_000),
+  idempotency_ttl_seconds: parse_positive_integer_env.("QIWEI_IDEMPOTENCY_TTL_SECONDS", 120),
+  cutover_enabled: qiwei_cutover_enabled,
+  cutover_tenant_whitelist: qiwei_cutover_whitelist
 gong_rpc_node_start_type =
   case System.get_env("GONG_RPC_NODE_START_TYPE") do
     "shortnames" -> :shortnames
