@@ -738,5 +738,23 @@ defmodule Men.Gateway.DispatchServerTest do
       assert {:error, :acl_denied} = DispatchServer.coordinate_event(server, event)
       refute_receive {:frame_rebuild_triggered, _}
     end
+
+    test "未知 source 不应提升为 system，必须 fail-closed 拒绝" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "telemetry",
+        source: "external.partner",
+        session_key: "s1",
+        target: "control",
+        event_id: "E7",
+        version: 1,
+        ets_keys: ["external.partner", "telemetry"],
+        payload: %{trace: "x"}
+      }
+
+      assert {:error, :acl_denied} = DispatchServer.coordinate_event(server, event)
+      refute_receive {:frame_rebuild_triggered, _}
+    end
   end
 end

@@ -1,6 +1,8 @@
 defmodule Men.Gateway.ReplAclTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias Men.Gateway.ReplAcl
 
   @policy %{
@@ -40,5 +42,29 @@ defmodule Men.Gateway.ReplAclTest do
 
     assert {:error, :acl_denied} =
              ReplAcl.authorize_write(tool, "agent.agent_a.data.result", @policy, %{})
+  end
+
+  test "acl_denied 日志包含最小字段集合" do
+    actor = %{role: :tool, tool_id: "t1", session_key: "s1"}
+
+    log =
+      capture_log(fn ->
+        assert {:error, :acl_denied} =
+                 ReplAcl.authorize_read(actor, "agent.agent_a.data.x", @policy, %{
+                   event_id: "e3",
+                   type: "tool_progress",
+                   source: "tool.t1"
+                 })
+      end)
+
+    assert log =~ "acl_denied"
+    assert log =~ "\"event_id\":\"e3\""
+    assert log =~ "\"session_key\":\"s1\""
+    assert log =~ "\"type\":\"tool_progress\""
+    assert log =~ "\"source\":\"tool.t1\""
+    assert log =~ "\"wake\":false"
+    assert log =~ "\"inbox_only\":false"
+    assert log =~ "\"decision_reason\":\"acl_denied\""
+    assert log =~ "\"policy_version\":\"test-v1\""
   end
 end

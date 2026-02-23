@@ -118,10 +118,11 @@ defmodule Men.Gateway.ReplAcl do
         event_id: Map.get(context, :event_id),
         type: Map.get(context, :type),
         source: Map.get(context, :source),
+        wake: Map.get(context, :wake, false),
+        inbox_only: Map.get(context, :inbox_only, false),
+        decision_reason: Map.get(context, :decision_reason, "acl_denied"),
         policy_version: policy_version(policy)
       }
-      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
-      |> Map.new()
 
     Logger.warning("acl_denied #{Jason.encode!(payload)}")
   rescue

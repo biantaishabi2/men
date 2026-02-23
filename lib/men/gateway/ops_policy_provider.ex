@@ -41,7 +41,7 @@ defmodule Men.Gateway.OpsPolicyProvider do
   end
 
   defp refresh_policy(options) do
-    cached = read_cache_raw()
+    cached = read_cache_raw(options)
 
     case fetch_remote_policy(options) do
       {:ok, remote} ->
@@ -150,8 +150,8 @@ defmodule Men.Gateway.OpsPolicyProvider do
 
   defp normalize_policy_version(_, version), do: {:ok, Integer.to_string(version)}
 
-  defp read_cache(_options) do
-    case read_cache_raw() do
+  defp read_cache(options) do
+    case read_cache_raw(options) do
       :miss ->
         :miss
 
@@ -164,11 +164,11 @@ defmodule Men.Gateway.OpsPolicyProvider do
     end
   end
 
-  defp read_cache_raw do
+  defp read_cache_raw(options) do
     ensure_table()
 
-    case :ets.lookup(@table, :policy) do
-      [{:policy, cached}] when is_map(cached) -> cached
+    case :ets.lookup(@table, cache_key(options)) do
+      [{_key, cached}] when is_map(cached) -> cached
       _ -> :miss
     end
   end
@@ -180,8 +180,17 @@ defmodule Men.Gateway.OpsPolicyProvider do
       policy
       |> Map.put(:expire_at_ms, now_ms() + ttl_ms)
 
-    :ets.insert(@table, {:policy, entry})
+    :ets.insert(@table, {cache_key(options), entry})
     :ok
+  end
+
+  defp cache_key(options) do
+    identity =
+      Map.get(options, :identity, default_identity())
+      |> normalize_opts()
+      |> Enum.sort()
+
+    {:policy, identity}
   end
 
   defp configured_cache_ttl_ms do

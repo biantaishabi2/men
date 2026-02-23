@@ -449,7 +449,7 @@ defmodule Men.Gateway.DispatchServer do
         }
 
       true ->
-        %{role: :system, session_key: envelope.session_key}
+        %{role: :unknown, session_key: envelope.session_key}
     end
   end
 

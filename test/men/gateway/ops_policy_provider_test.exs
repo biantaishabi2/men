@@ -30,6 +30,16 @@ defmodule Men.Gateway.OpsPolicyProviderTest do
           },
           "wake" => %{"must_wake" => ["agent_result"], "inbox_only" => ["telemetry"]},
           "dedup_ttl_ms" => 60_000
+        },
+        {"tenant-b", "prod", "gateway", "gateway_runtime"} => %{
+          "acl" => %{
+            "main" => %{"read" => ["global."], "write" => ["global.control."]},
+            "child" => %{"read" => ["agent.$agent_id."], "write" => ["agent.$agent_id."]},
+            "tool" => %{"read" => ["agent.$agent_id."], "write" => ["inbox."]},
+            "system" => %{"read" => [""], "write" => [""]}
+          },
+          "wake" => %{"must_wake" => ["policy_changed"], "inbox_only" => ["heartbeat"]},
+          "dedup_ttl_ms" => 12_345
         }
       })
     )
@@ -60,5 +70,22 @@ defmodule Men.Gateway.OpsPolicyProviderTest do
 
     assert second.policy_version == "fallback"
     assert second.version == 0
+  end
+
+  test "缓存按 identity 分桶，避免跨租户命中错误策略" do
+    assert {:ok, tenant_a} =
+             OpsPolicyProvider.get_policy(
+               identity: %{tenant: "tenant-ok", env: "prod", scope: "gateway"}
+             )
+
+    assert {:ok, tenant_b} =
+             OpsPolicyProvider.get_policy(
+               identity: %{tenant: "tenant-b", env: "prod", scope: "gateway"}
+             )
+
+    assert tenant_a.dedup_ttl_ms == 60_000
+    assert tenant_b.dedup_ttl_ms == 12_345
+    assert tenant_a.wake["must_wake"] == ["agent_result"]
+    assert tenant_b.wake["must_wake"] == ["policy_changed"]
   end
 end
