@@ -78,7 +78,7 @@ defmodule Men.RuntimeBridge.ZcpgRPCTest do
 
     @impl true
     def request(:post, _url, _headers, body, _opts) do
-      %{"prompt" => prompt} = Jason.decode!(body)
+      %{"payload" => %{"prompt" => prompt}} = Jason.decode!(body)
 
       case prompt do
         "timeout" ->
@@ -102,7 +102,7 @@ defmodule Men.RuntimeBridge.ZcpgRPCTest do
 
     Application.put_env(:men, ZcpgRPC,
       base_url: "http://example.test",
-      path: "/v1/runtime/bridge/prompt",
+      path: "/internal/agent_gateway/v1/execute",
       token: "test-token",
       timeout: 321,
       transport: MockTransport
@@ -147,10 +147,15 @@ defmodule Men.RuntimeBridge.ZcpgRPCTest do
     assert request_opts[:timeout_ms] == 321
 
     decoded = Jason.decode!(body)
-    assert decoded["request_id"] == "req-1"
-    assert decoded["session_key"] == "s1"
     assert decoded["run_id"] == "run-1"
-    assert decoded["prompt"] == "hello"
+    assert decoded["tenant_id"] == "default_tenant"
+    assert decoded["trace_id"] == "req-1"
+    assert decoded["agent_id"] == "voucher_agent"
+    assert decoded["timeout_ms"] == 321
+    assert decoded["payload"]["prompt"] == "hello"
+    assert decoded["payload"]["raw_input"] == "hello"
+    assert decoded["payload"]["request_id"] == "req-1"
+    assert decoded["payload"]["session_key"] == "s1"
   end
 
   test "网关超时映射: 网络超时与 504 都返回 timeout+retryable=true" do

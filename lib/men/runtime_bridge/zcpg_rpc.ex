@@ -9,7 +9,7 @@ defmodule Men.RuntimeBridge.ZcpgRPC do
 
   @default_runtime_id "zcpg_rpc"
   @default_base_url "http://127.0.0.1:4015"
-  @default_path "/v1/runtime/bridge/prompt"
+  @default_path "/internal/agent_gateway/v1/execute"
   @default_timeout_ms 30_000
 
   defmodule HttpTransport do
@@ -52,7 +52,7 @@ defmodule Men.RuntimeBridge.ZcpgRPC do
     started_at = System.monotonic_time(:millisecond)
 
     with {:ok, cfg} <- build_config(request, opts),
-         {:ok, payload} <- build_request_payload(request),
+         {:ok, payload} <- build_request_payload(request, cfg.request_opts[:timeout_ms]),
          {:ok, encoded_body} <- Jason.encode(payload),
          {:ok, %{status: status, body: body}} <- do_http_request(cfg, encoded_body),
          {:ok, text, meta} <- parse_response(status, body) do
@@ -162,7 +162,8 @@ defmodule Men.RuntimeBridge.ZcpgRPC do
   defp build_headers(token) do
     [
       {"content-type", "application/json"},
-      {"authorization", "Bearer " <> token}
+      {"authorization", "Bearer " <> token},
+      {"x-internal-token", token}
     ]
   end
 
@@ -174,19 +175,30 @@ defmodule Men.RuntimeBridge.ZcpgRPC do
       @default_timeout_ms
   end
 
-  defp build_request_payload(%Request{} = request) do
+  defp build_request_payload(%Request{} = request, effective_timeout_ms) do
     opts = request.opts || %{}
 
     request_id = map_value(opts, :request_id, "unknown_request")
     run_id = map_value(opts, :run_id, generate_run_id())
     session_key = request.session_id || map_value(opts, :session_key, "unknown_session")
+    tenant_id = map_value(opts, :tenant_id, "default_tenant")
+    trace_id = map_value(opts, :trace_id, request_id)
+    agent_id = map_value(opts, :agent_id, "voucher_agent")
+    prompt = normalize_prompt(request.payload)
 
     {:ok,
      %{
-       request_id: request_id,
-       session_key: session_key,
        run_id: run_id,
-       prompt: normalize_prompt(request.payload)
+       tenant_id: tenant_id,
+       trace_id: trace_id,
+       agent_id: agent_id,
+       timeout_ms: effective_timeout_ms || request.timeout_ms || @default_timeout_ms,
+       payload: %{
+         prompt: prompt,
+         raw_input: prompt,
+         request_id: request_id,
+         session_key: session_key
+       }
      }}
   end
 

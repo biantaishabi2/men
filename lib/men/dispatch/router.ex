@@ -114,12 +114,16 @@ defmodule Men.Dispatch.Router do
 
   defp bridge_context(context, state) do
     runtime_session_id = resolve_runtime_session_id(state, context.session_key)
+    tenant_id = extract_tenant_id(context)
+    request_id = context.request_id
 
     %{
-      request_id: context.request_id,
+      request_id: request_id,
       session_key: runtime_session_id,
       external_session_key: context.session_key,
-      run_id: context.run_id
+      run_id: context.run_id,
+      tenant_id: tenant_id,
+      trace_id: request_id
     }
     |> maybe_put_event_callback(state, context)
   end
@@ -170,4 +174,20 @@ defmodule Men.Dispatch.Router do
   end
 
   defp invalidation_code(_), do: nil
+
+  defp extract_tenant_id(context) do
+    metadata = Map.get(context, :metadata, %{})
+    payload = Map.get(context, :payload)
+
+    map_value(metadata, :tenant_id, nil) ||
+      map_value(payload, :tenant_id, nil) ||
+      map_value(payload, :tenantId, nil) ||
+      "default_tenant"
+  end
+
+  defp map_value(map, key, default) when is_map(map) do
+    Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+  end
+
+  defp map_value(_map, _key, default), do: default
 end
