@@ -96,7 +96,11 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
     end
   end
 
-  defp maybe_send_event(target, %EventMessage{event_type: :delta} = message, %{stream_output_mode: :final_only} = cfg) do
+  defp maybe_send_event(
+         target,
+         %EventMessage{event_type: :delta} = message,
+         %{stream_output_mode: :final_only} = cfg
+       ) do
     log_meta = stream_log_meta(target, message.metadata, nil)
 
     Logger.info("dingtalk_robot_egress.delta_drop",
@@ -310,8 +314,9 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
     end
   end
 
-  defp parse_stream_output_mode(value) when value in [:delta_plus_final, :delta_only, :final_only],
-    do: value
+  defp parse_stream_output_mode(value)
+       when value in [:delta_plus_final, :delta_only, :final_only],
+       do: value
 
   defp parse_stream_output_mode(value) when is_binary(value) do
     case String.downcase(String.trim(value)) do
@@ -363,7 +368,10 @@ defmodule Men.Channels.Egress.DingtalkRobotAdapter do
 
   defp suppress_final?(%{stream_output_mode: :delta_plus_final}, _run_id), do: false
   defp suppress_final?(%{stream_output_mode: :final_only}, _run_id), do: false
-  defp suppress_final?(%{stream_output_mode: :delta_only}, run_id), do: delta_seen_recently?(run_id)
+
+  defp suppress_final?(%{stream_output_mode: :delta_only}, run_id),
+    do: delta_seen_recently?(run_id)
+
   defp suppress_final?(_cfg, _run_id), do: false
 
   defp mark_stream_delta_sent(run_id, ttl_ms) when is_binary(run_id) and run_id != "" do

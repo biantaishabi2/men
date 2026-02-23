@@ -48,7 +48,8 @@ defmodule Men.Channels.Egress.Messages do
 
   @required_metadata_keys [:run_id, :session_key, :request_id, :seq, :timestamp]
 
-  @spec build_metadata(map() | nil, map() | nil) :: {:ok, map()} | {:error, {:missing_metadata, atom()}}
+  @spec build_metadata(map() | nil, map() | nil) ::
+          {:ok, map()} | {:error, {:missing_metadata, atom()}}
   def build_metadata(base_metadata, required_metadata) do
     metadata =
       base_metadata
@@ -72,7 +73,11 @@ defmodule Men.Channels.Egress.Messages do
 
   @spec final_message(String.t(), String.t(), map()) :: FinalMessage.t()
   def final_message(session_key, content, metadata \\ %{}) do
-    %FinalMessage{session_key: session_key, content: content, metadata: normalize_metadata(metadata)}
+    %FinalMessage{
+      session_key: session_key,
+      content: content,
+      metadata: normalize_metadata(metadata)
+    }
   end
 
   @spec error_message(String.t(), String.t(), String.t() | nil, map()) :: ErrorMessage.t()
@@ -116,7 +121,8 @@ defmodule Men.Channels.Egress.Messages.EventMessage do
           metadata: map()
         }
 
-  @spec new(atom() | String.t(), term(), map() | nil, map() | nil) :: {:ok, t()} | {:error, term()}
+  @spec new(atom() | String.t(), term(), map() | nil, map() | nil) ::
+          {:ok, t()} | {:error, term()}
   def new(event_type, payload, metadata \\ %{}, required_metadata \\ %{}) do
     with {:ok, normalized_event_type} <- normalize_event_type(event_type),
          {:ok, final_metadata} <- Messages.build_metadata(metadata, required_metadata) do
