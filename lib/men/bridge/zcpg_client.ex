@@ -19,7 +19,7 @@ defmodule Men.Bridge.ZcpgClient do
 
   def start_turn(prompt, context) when is_binary(prompt) and is_map(context) do
     start_ms = System.monotonic_time(:millisecond)
-    timeout_ms = timeout_ms()
+    timeout_ms = timeout_ms(context)
 
     request = %Request{
       runtime_id: "zcpg",
@@ -31,7 +31,8 @@ defmodule Men.Bridge.ZcpgClient do
         run_id: map_value(context, :run_id, generate_run_id()),
         session_key: map_value(context, :session_key, "unknown_session"),
         tenant_id: map_value(context, :tenant_id, "default_tenant"),
-        trace_id: map_value(context, :trace_id, map_value(context, :request_id, "unknown_request")),
+        trace_id:
+          map_value(context, :trace_id, map_value(context, :request_id, "unknown_request")),
         agent_id: map_value(context, :agent_id, "voucher_agent")
       }
     }
@@ -126,7 +127,30 @@ defmodule Men.Bridge.ZcpgClient do
     )
   end
 
-  defp timeout_ms do
+  defp timeout_ms(context) do
+    callback_timeout =
+      case map_value(context, :callback_timeout_ms, nil) do
+        value when is_binary(value) ->
+          case Integer.parse(value) do
+            {parsed, ""} when parsed > 0 -> parsed
+            _ -> nil
+          end
+
+        value when is_integer(value) and value > 0 ->
+          value
+
+        _ ->
+          nil
+      end
+
+    if callback_timeout do
+      callback_timeout
+    else
+      timeout_ms_from_cutover()
+    end
+  end
+
+  defp timeout_ms_from_cutover do
     cfg = Application.get_env(:men, :zcpg_cutover, [])
     Keyword.get(cfg, :timeout_ms, @default_timeout_ms)
   end
