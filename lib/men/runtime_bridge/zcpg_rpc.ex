@@ -49,11 +49,15 @@ defmodule Men.RuntimeBridge.ZcpgRPC do
 
   @impl true
   def prompt(%Request{} = request, opts \\ []) do
+    started_at = System.monotonic_time(:millisecond)
+
     with {:ok, cfg} <- build_config(request, opts),
          {:ok, payload} <- build_request_payload(request),
          {:ok, encoded_body} <- Jason.encode(payload),
          {:ok, %{status: status, body: body}} <- do_http_request(cfg, encoded_body),
          {:ok, text, meta} <- parse_response(status, body) do
+      emit_telemetry(:ok, started_at, %{status: status})
+
       {:ok,
        %Response{
          runtime_id: normalize_runtime_id(request.runtime_id),
@@ -63,9 +67,12 @@ defmodule Men.RuntimeBridge.ZcpgRPC do
        }}
     else
       {:error, %Error{} = error} ->
+        emit_telemetry(:error, started_at, %{code: error.code})
         {:error, error}
 
       {:error, reason} ->
+        emit_telemetry(:error, started_at, %{code: :transport_error})
+
         {:error,
          transport_error("zcpg rpc transport failed",
            reason: inspect(reason)
@@ -357,5 +364,15 @@ defmodule Men.RuntimeBridge.ZcpgRPC do
 
   defp generate_run_id do
     "run-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
+  end
+
+  defp emit_telemetry(status, started_at, metadata) do
+    duration_ms = System.monotonic_time(:millisecond) - started_at
+
+    :telemetry.execute(
+      [:men, :runtime_bridge, :zcpg_rpc, :request],
+      %{duration_ms: duration_ms},
+      Map.put(metadata, :status, status)
+    )
   end
 end

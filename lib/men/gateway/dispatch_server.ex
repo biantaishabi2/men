@@ -7,12 +7,21 @@ defmodule Men.Gateway.DispatchServer do
   require Logger
 
   alias Men.Channels.Egress.Messages.{ErrorMessage, EventMessage, FinalMessage}
+  alias Men.Dispatch.{CircuitBreaker, Router}
   alias Men.Gateway.SessionCoordinator
   alias Men.Gateway.Types
   alias Men.Routing.SessionKey
 
   @type state :: %{
-          bridge_adapter: module(),
+          legacy_bridge_adapter: module(),
+          zcpg_client: module(),
+          cutover_policy: module(),
+          zcpg_cutover_config: keyword(),
+          zcpg_cutover_dynamic?: boolean(),
+          zcpg_breaker: CircuitBreaker.t(),
+          get_runtime_session_id: (GenServer.server(), binary() ->
+                                     {:ok, binary()} | {:error, term()}),
+          build_event_callback: (map(), map() -> (map() -> :ok)),
           egress_adapter: module(),
           storage_adapter: term(),
           streaming_enabled: boolean(),
@@ -62,9 +71,34 @@ defmodule Men.Gateway.DispatchServer do
   def init(opts) do
     config = Application.get_env(:men, __MODULE__, [])
     coordinator_config = Application.get_env(:men, SessionCoordinator, [])
+    cutover_config = Application.get_env(:men, :zcpg_cutover, [])
+    breaker_config = Keyword.get(cutover_config, :breaker, [])
+    dynamic_cutover? = not Keyword.has_key?(opts, :zcpg_cutover_config)
 
     state = %{
-      bridge_adapter: Keyword.get(opts, :bridge_adapter, Keyword.fetch!(config, :bridge_adapter)),
+      legacy_bridge_adapter:
+        Keyword.get(
+          opts,
+          :legacy_bridge_adapter,
+          Keyword.get(opts, :bridge_adapter, Keyword.fetch!(config, :bridge_adapter))
+        ),
+      zcpg_client: Keyword.get(opts, :zcpg_client, Men.Bridge.ZcpgClient),
+      cutover_policy: Keyword.get(opts, :cutover_policy, Men.Dispatch.CutoverPolicy),
+      zcpg_cutover_config: Keyword.get(opts, :zcpg_cutover_config, cutover_config),
+      zcpg_cutover_dynamic?: dynamic_cutover?,
+      zcpg_breaker:
+        Keyword.get(
+          opts,
+          :zcpg_breaker,
+          CircuitBreaker.new(
+            failure_threshold: Keyword.get(breaker_config, :failure_threshold, 5),
+            window_seconds: Keyword.get(breaker_config, :window_seconds, 30),
+            cooldown_seconds: Keyword.get(breaker_config, :cooldown_seconds, 60)
+          )
+        ),
+      get_runtime_session_id:
+        Keyword.get(opts, :get_runtime_session_id, &safe_get_or_create_runtime_session_id/2),
+      build_event_callback: Keyword.get(opts, :build_event_callback, &build_event_callback/2),
       egress_adapter: Keyword.get(opts, :egress_adapter, Keyword.fetch!(config, :egress_adapter)),
       storage_adapter:
         Keyword.get(opts, :storage_adapter, Keyword.get(config, :storage_adapter, :memory)),
@@ -124,58 +158,17 @@ defmodule Men.Gateway.DispatchServer do
   defp run_dispatch(state, inbound_event) do
     Logger.info("dispatch_server.run_dispatch.begin", event: summarize_event(inbound_event))
 
-    with {:ok, context} <- normalize_event(inbound_event),
-         :ok <- ensure_not_duplicate(context.run_id, state),
-         {:ok, bridge_payload} <- do_start_turn(state, context),
-         :ok <- do_send_final(state, context, bridge_payload) do
-      new_state = mark_processed(state, context)
+    case normalize_event(inbound_event) do
+      {:ok, context} ->
+        case ensure_not_duplicate(context.run_id, state) do
+          :ok ->
+            run_with_route(state, context)
 
-      Logger.info("dispatch_server.run_dispatch.ok",
-        request_id: context.request_id,
-        run_id: context.run_id,
-        session_key: context.session_key
-      )
-
-      {{:ok, build_dispatch_result(context, bridge_payload)}, new_state}
-    else
-      {:duplicate, run_id} ->
-        _ = run_id
-        Logger.warning("dispatch_server.run_dispatch.duplicate", run_id: run_id)
-        {{:ok, :duplicate}, state}
-
-      {:bridge_error, error_payload, context} ->
-        Logger.error("dispatch_server.run_dispatch.bridge_error",
-          request_id: context.request_id,
-          run_id: context.run_id,
-          type: Map.get(error_payload, :type),
-          code: Map.get(error_payload, :code),
-          message: Map.get(error_payload, :message),
-          details: Map.get(error_payload, :details),
-          error_payload:
-            inspect(error_payload, pretty: true, limit: :infinity, printable_limit: :infinity)
-        )
-
-        error_payload = ensure_error_egress_result(state, context, error_payload)
-        new_state = maybe_mark_processed(state, context, error_payload)
-        {{:error, build_error_result(context, error_payload)}, new_state}
-
-      {:egress_error, reason, context} ->
-        Logger.error("dispatch_server.run_dispatch.egress_error",
-          request_id: context.request_id,
-          run_id: context.run_id,
-          reason: inspect(reason)
-        )
-
-        error_payload = %{
-          type: :failed,
-          code: "EGRESS_ERROR",
-          message: "egress send failed",
-          details: %{reason: inspect(reason)}
-        }
-
-        error_payload = ensure_error_egress_result(state, context, error_payload)
-        new_state = maybe_mark_processed(state, context, error_payload)
-        {{:error, build_error_result(context, error_payload)}, new_state}
+          {:duplicate, run_id} ->
+            _ = run_id
+            Logger.warning("dispatch_server.run_dispatch.duplicate", run_id: run_id)
+            {{:ok, :duplicate}, state}
+        end
 
       {:error, reason} ->
         Logger.error("dispatch_server.run_dispatch.invalid_event", reason: inspect(reason))
@@ -191,6 +184,82 @@ defmodule Men.Gateway.DispatchServer do
 
         error_payload = ensure_error_egress_result(state, synthetic_context, error_payload)
         {{:error, build_error_result(synthetic_context, error_payload)}, state}
+    end
+  end
+
+  defp run_with_route(state, context) do
+    state = maybe_refresh_cutover_config(state)
+
+    with {:ok, prompt} <- payload_to_prompt(context.payload) do
+      case Router.execute(state, context, prompt) do
+        {:ignore, routing_state} ->
+          Logger.info("dispatch_server.run_dispatch.ignored",
+            request_id: context.request_id,
+            run_id: context.run_id,
+            reason: "not_mentioned"
+          )
+
+          {{:ok, :ignored}, routing_state}
+
+        {:ok, bridge_payload, routing_state} ->
+          case do_send_final(routing_state, context, bridge_payload) do
+            :ok ->
+              new_state = mark_processed(routing_state, context)
+
+              Logger.info("dispatch_server.run_dispatch.ok",
+                request_id: context.request_id,
+                run_id: context.run_id,
+                session_key: context.session_key
+              )
+
+              {{:ok, build_dispatch_result(context, bridge_payload)}, new_state}
+
+            {:egress_error, reason, context} ->
+              Logger.error("dispatch_server.run_dispatch.egress_error",
+                request_id: context.request_id,
+                run_id: context.run_id,
+                reason: inspect(reason)
+              )
+
+              error_payload = %{
+                type: :failed,
+                code: "EGRESS_ERROR",
+                message: "egress send failed",
+                details: %{reason: inspect(reason)}
+              }
+
+              error_payload = ensure_error_egress_result(routing_state, context, error_payload)
+              new_state = maybe_mark_processed(routing_state, context, error_payload)
+              {{:error, build_error_result(context, error_payload)}, new_state}
+          end
+
+        {:error, error_payload, routing_state} ->
+          Logger.error("dispatch_server.run_dispatch.bridge_error",
+            request_id: context.request_id,
+            run_id: context.run_id,
+            type: Map.get(error_payload, :type),
+            code: Map.get(error_payload, :code),
+            message: Map.get(error_payload, :message),
+            details: Map.get(error_payload, :details),
+            error_payload:
+              inspect(error_payload, pretty: true, limit: :infinity, printable_limit: :infinity)
+          )
+
+          error_payload = ensure_error_egress_result(routing_state, context, error_payload)
+          new_state = maybe_mark_processed(routing_state, context, error_payload)
+          {{:error, build_error_result(context, error_payload)}, new_state}
+      end
+    else
+      {:error, reason} ->
+        error_payload = %{
+          type: :failed,
+          code: "INVALID_PAYLOAD",
+          message: "payload encode failed",
+          details: %{reason: inspect(reason)}
+        }
+
+        error_payload = ensure_error_egress_result(state, context, error_payload)
+        {{:error, build_error_result(context, error_payload)}, state}
     end
   end
 
@@ -242,6 +311,7 @@ defmodule Men.Gateway.DispatchServer do
        %{
          request_id: request_id,
          payload: payload,
+         channel: Map.get(inbound_event, :channel),
          metadata: metadata,
          session_key: session_key,
          run_id: run_id
@@ -304,51 +374,6 @@ defmodule Men.Gateway.DispatchServer do
     end
   end
 
-  defp do_start_turn(state, context) do
-    runtime_session_id = resolve_runtime_session_id(state, context.session_key)
-
-    bridge_context =
-      %{
-        request_id: context.request_id,
-        session_key: runtime_session_id,
-        external_session_key: context.session_key,
-        run_id: context.run_id
-      }
-      |> maybe_put_event_callback(state, context)
-
-    with {:ok, prompt} <- payload_to_prompt(context.payload) do
-      case state.bridge_adapter.start_turn(prompt, bridge_context) do
-        {:ok, payload} ->
-          {:ok, payload}
-
-        {:error, error_payload} ->
-          maybe_invalidate_runtime_session(
-            state,
-            context.session_key,
-            runtime_session_id,
-            error_payload
-          )
-
-          {:bridge_error, error_payload, context}
-      end
-    else
-      {:error, reason} ->
-        {:bridge_error,
-         %{
-           type: :failed,
-           code: "INVALID_PAYLOAD",
-           message: "payload encode failed",
-           details: %{reason: inspect(reason)}
-         }, context}
-    end
-  end
-
-  defp maybe_put_event_callback(context_map, %{streaming_enabled: true} = state, context) do
-    Map.put(context_map, :event_callback, build_event_callback(state, context))
-  end
-
-  defp maybe_put_event_callback(context_map, _state, _context), do: context_map
-
   defp build_event_callback(state, context) do
     fn event ->
       case do_send_event(state, context, event) do
@@ -367,19 +392,6 @@ defmodule Men.Gateway.DispatchServer do
     end
   end
 
-  defp resolve_runtime_session_id(%{session_coordinator_enabled: false}, session_key),
-    do: session_key
-
-  defp resolve_runtime_session_id(state, session_key) do
-    case safe_get_or_create_runtime_session_id(state.session_coordinator_name, session_key) do
-      {:ok, runtime_session_id} ->
-        runtime_session_id
-
-      {:error, _reason} ->
-        session_key
-    end
-  end
-
   # coordinator 可能在调用窗口重启，捕获 exit 以保证 dispatch 可降级。
   defp safe_get_or_create_runtime_session_id(coordinator_name, session_key) do
     try do
@@ -392,53 +404,6 @@ defmodule Men.Gateway.DispatchServer do
       :exit, _reason -> {:error, :session_coordinator_unavailable}
     end
   end
-
-  defp maybe_invalidate_runtime_session(
-         %{session_coordinator_enabled: false},
-         _session_key,
-         _runtime_session_id,
-         _error_payload
-       ),
-       do: :ok
-
-  defp maybe_invalidate_runtime_session(state, session_key, runtime_session_id, error_payload) do
-    code =
-      error_payload
-      |> Map.get(:code)
-      |> normalize_error_code()
-
-    if code == "",
-      do: :ok,
-      else: invalidate_session_mapping(state, session_key, runtime_session_id, code)
-  end
-
-  defp invalidate_session_mapping(state, session_key, runtime_session_id, code) do
-    _ =
-      safe_invalidate_session_mapping(state.session_coordinator_name, %{
-        session_key: session_key,
-        runtime_session_id: runtime_session_id,
-        code: code
-      })
-
-    :ok
-  end
-
-  # 失效剔除属于尽力而为，coordinator 不可用时不影响主链路返回。
-  defp safe_invalidate_session_mapping(coordinator_name, reason) do
-    try do
-      SessionCoordinator.invalidate_by_session_key(coordinator_name, reason)
-    catch
-      :exit, _reason -> :ignored
-    end
-  end
-
-  defp normalize_error_code(code) when is_atom(code),
-    do: code |> Atom.to_string() |> String.downcase()
-
-  defp normalize_error_code(code) when is_binary(code),
-    do: code |> String.trim() |> String.downcase()
-
-  defp normalize_error_code(_), do: ""
 
   defp generate_runtime_session_id do
     "runtime-session-" <> Integer.to_string(System.unique_integer([:positive, :monotonic]))
@@ -585,6 +550,13 @@ defmodule Men.Gateway.DispatchServer do
         })
     }
   end
+
+  # 仅在未显式注入测试配置时，按请求动态读取 runtime env，确保 cutover 可即时切换。
+  defp maybe_refresh_cutover_config(%{zcpg_cutover_dynamic?: true} = state) do
+    %{state | zcpg_cutover_config: Application.get_env(:men, :zcpg_cutover, [])}
+  end
+
+  defp maybe_refresh_cutover_config(state), do: state
 
   defp fallback_context(%{} = inbound_event) do
     %{

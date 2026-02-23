@@ -20,7 +20,7 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
           {:ok,
            %{
              request_id: "req-timeout",
-             payload: %{channel: "dingtalk", content: "timeout"},
+             payload: %{channel: "dingtalk", content: "@bot timeout"},
              channel: "dingtalk",
              user_id: "user-timeout"
            }}
@@ -29,7 +29,7 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
           {:ok,
            %{
              request_id: "req-slow",
-             payload: %{channel: "dingtalk", content: "slow"},
+             payload: %{channel: "dingtalk", content: "@bot slow"},
              channel: "dingtalk",
              user_id: "user-slow"
            }}
@@ -38,7 +38,7 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
           {:ok,
            %{
              request_id: "req-ok",
-             payload: %{channel: "dingtalk", content: "hello"},
+             payload: %{channel: "dingtalk", content: "@bot hello"},
              channel: "dingtalk",
              user_id: "user-ok"
            }}
@@ -61,11 +61,11 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
 
       timeout? =
         case Jason.decode(prompt) do
-          {:ok, %{"content" => "slow"}} ->
+          {:ok, %{"content" => "@bot slow"}} ->
             Process.sleep(200)
             false
 
-          {:ok, %{"content" => "timeout"}} ->
+          {:ok, %{"content" => "@bot timeout"}} ->
             true
 
           _ ->
@@ -135,7 +135,7 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
     assert Jason.decode!(request.raw_body) == %{"mode" => "ok"}
 
     assert_receive {:bridge_called, prompt, _context}
-    assert Jason.decode!(prompt) == %{"channel" => "dingtalk", "content" => "hello"}
+    assert Jason.decode!(prompt) == %{"channel" => "dingtalk", "content" => "@bot hello"}
   end
 
   test "非法签名：被拒绝且不进入 dispatch", %{conn: conn} do
@@ -165,7 +165,7 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
     assert_receive {:ingress_called, _request}
 
     assert_receive {:bridge_called, prompt, _context}
-    assert Jason.decode!(prompt) == %{"channel" => "dingtalk", "content" => "timeout"}
+    assert Jason.decode!(prompt) == %{"channel" => "dingtalk", "content" => "@bot timeout"}
   end
 
   test "慢桥接不阻塞 webhook ACK" do
@@ -180,7 +180,7 @@ defmodule MenWeb.Webhooks.DingtalkControllerTest do
     assert duration_ms < 150
 
     assert_receive {:bridge_called, prompt, _context}
-    assert Jason.decode!(prompt) == %{"channel" => "dingtalk", "content" => "slow"}
+    assert Jason.decode!(prompt) == %{"channel" => "dingtalk", "content" => "@bot slow"}
   end
 
   test "并发请求下 webhook 语义稳定（统一 accepted）" do
