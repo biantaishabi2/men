@@ -189,6 +189,7 @@ defmodule Men.Gateway.DispatchServer do
 
   defp run_with_route(state, context) do
     state = maybe_refresh_cutover_config(state)
+    log_feature_probe(context)
 
     with {:ok, prompt} <- payload_to_prompt(context.payload) do
       case Router.execute(state, context, prompt) do
@@ -312,6 +313,24 @@ defmodule Men.Gateway.DispatchServer do
         error_payload = ensure_error_egress_result(state, context, error_payload)
         {{:error, build_error_result(context, error_payload)}, state}
     end
+  end
+
+  # 运行时探针：明确输出当前主链路是否真正接入 #52 相关能力，
+  # 避免仅凭模块存在就误判“已启用”。
+  defp log_feature_probe(context) do
+    payload = %{
+      request_id: context.request_id,
+      run_id: context.run_id,
+      session_key: context.session_key,
+      coordinate_event_exported: function_exported?(__MODULE__, :coordinate_event, 3),
+      prompt_composer_loaded: Code.ensure_loaded?(Men.Gateway.PromptComposer),
+      frame_builder_loaded: Code.ensure_loaded?(Men.Gateway.FrameBuilder),
+      repl_store_loaded: Code.ensure_loaded?(Men.Gateway.ReplStore),
+      repl_acl_loaded: Code.ensure_loaded?(Men.Gateway.ReplACL),
+      wake_policy_loaded: Code.ensure_loaded?(Men.Gateway.WakePolicy)
+    }
+
+    Logger.info("dispatch_server.feature_probe #{Jason.encode!(payload)}")
   end
 
   defp summarize_event(%{} = inbound_event) do
