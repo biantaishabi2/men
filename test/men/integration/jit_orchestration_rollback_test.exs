@@ -115,6 +115,46 @@ defmodule Men.Integration.JitOrchestrationRollbackTest do
     assert_event_present?(telemetry_events, @event_prefix ++ [:cycle_completed])
   end
 
+  test "图执行失败时降级到固定编排路径并发出 degraded 事件" do
+    runtime_state = %{
+      goal: "图失败降级验证",
+      policy: %{mode: :jit}
+    }
+
+    graph_runner = fn
+      :research_reduce, _payload -> {:error, "research crashed"}
+      :execute_compile, _payload -> {:ok, %{result: "compiled", data: %{}, diagnostics: %{}}}
+    end
+
+    assert {:ok, result} =
+             Adapter.orchestrate(runtime_state,
+               trace_id: "trace-graph-failed-1",
+               session_id: "session-graph-failed-1",
+               jit_flag: :jit_enabled,
+               graph_runner: graph_runner
+             )
+
+    assert result.degraded? == true
+    assert result.fallback_path == :fixed_orchestration
+    assert result.flag_state == :jit_enabled
+    assert result.advisor_decision == :fixed_path
+    assert result.snapshot_action == :fixed_path
+    assert result.degrade_reason.code == "graph_failed"
+
+    telemetry_events = collect_telemetry_events(6)
+    assert_event_present?(telemetry_events, @event_prefix ++ [:degraded])
+    assert_event_present?(telemetry_events, @event_prefix ++ [:cycle_completed])
+  end
+
+  test "replay 脚本参数缺值时返回受控错误而非 unbound variable 崩溃" do
+    script_path = Path.expand("scripts/jit/replay.sh", File.cwd!())
+    {output, status} = System.cmd("bash", [script_path, "--input"], stderr_to_stdout: true)
+
+    assert status == 1
+    assert output =~ "参数 --input 缺少值"
+    assert output =~ "用法"
+  end
+
   defp collect_telemetry_events(max_count, acc \\ [])
 
   defp collect_telemetry_events(0, acc), do: Enum.reverse(acc)

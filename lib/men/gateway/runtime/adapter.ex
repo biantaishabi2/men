@@ -290,7 +290,7 @@ defmodule Men.Gateway.Runtime.Adapter do
   defp resolve_flag("jit_enabled"), do: :jit_enabled
   defp resolve_flag("jit_disabled"), do: :jit_disabled
   defp resolve_flag("smoke_mode"), do: :smoke_mode
-  defp resolve_flag(_), do: :jit_enabled
+  defp resolve_flag(_), do: :jit_disabled
 
   defp invoke_graph(action, payload, opts) do
     if runner = opts[:graph_runner] do

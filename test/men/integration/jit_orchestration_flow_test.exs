@@ -108,6 +108,60 @@ defmodule Men.Integration.JitOrchestrationFlowTest do
            end)
   end
 
+  test "并发执行 orchestrate 时保持结果稳定且不崩溃" do
+    runtime_state = %{
+      goal: "并发稳定性验证",
+      policy: %{mode: :jit, strict: true},
+      current_focus: %{text: "并发触发", refs: ["issue-34"]},
+      next_candidates: [%{id: "step-1", title: "收敛"}],
+      constraints: [%{text: "稳定优先", active: true}],
+      key_claim_confidence: 0.95,
+      graph_change_rate: 0.01,
+      research_state: %{claims: %{}},
+      research_events: [%{claim_id: "c-1", action: :support, source_weight: 1.0}],
+      execute_tasks: [%{task_id: "t-1", blocked_by: []}],
+      execute_edges: []
+    }
+
+    graph_runner = fn
+      :research_reduce, _payload ->
+        {:ok, %{result: "ok", data: %{"diff" => %{"blocking_added" => []}}, diagnostics: %{}}}
+
+      :execute_compile, _payload ->
+        {:ok, %{result: "compiled", data: %{"layers" => [["t-1"]]}, diagnostics: %{}}}
+    end
+
+    results =
+      1..8
+      |> Task.async_stream(
+        fn idx ->
+          Adapter.orchestrate(runtime_state,
+            trace_id: "trace-flow-concurrent-#{idx}",
+            session_id: "session-flow-concurrent-#{idx}",
+            jit_flag: :jit_enabled,
+            graph_runner: graph_runner,
+            current_mode: :research,
+            mode_context: ModeStateMachine.initial_context(),
+            mode_policy_apply: true,
+            mode_state_machine_options: %{stable_window_ticks: 1, enter_threshold: 0.75}
+          )
+        end,
+        timeout: 3_000,
+        max_concurrency: 8
+      )
+      |> Enum.to_list()
+
+    assert Enum.all?(results, &match?({:ok, {:ok, _}}, &1))
+
+    Enum.each(results, fn {:ok, {:ok, result}} ->
+      assert result.mode == :execute
+      assert result.degraded? == false
+      assert result.flag_state == :jit_enabled
+      assert is_binary(result.trace_id)
+      assert is_binary(result.session_id)
+    end)
+  end
+
   defp collect_telemetry_events(max_count, acc \\ [])
 
   defp collect_telemetry_events(0, acc), do: Enum.reverse(acc)

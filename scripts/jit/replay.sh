@@ -20,14 +20,29 @@ SESSION_ID=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --input)
+      if [[ -z "${2-}" ]]; then
+        echo "参数 --input 缺少值" >&2
+        usage
+        exit 1
+      fi
       INPUT="$2"
       shift 2
       ;;
     --trace-id)
+      if [[ -z "${2-}" ]]; then
+        echo "参数 --trace-id 缺少值" >&2
+        usage
+        exit 1
+      fi
       TRACE_ID="$2"
       shift 2
       ;;
     --session-id)
+      if [[ -z "${2-}" ]]; then
+        echo "参数 --session-id 缺少值" >&2
+        usage
+        exit 1
+      fi
       SESSION_ID="$2"
       shift 2
       ;;
