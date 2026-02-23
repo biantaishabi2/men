@@ -3,6 +3,7 @@ defmodule Men.Gateway.DispatchServerTest do
 
   alias Men.Channels.Egress.Messages.{ErrorMessage, EventMessage, FinalMessage}
   alias Men.Gateway.DispatchServer
+  alias Men.Gateway.ReplStore
   alias Men.Gateway.SessionCoordinator
 
   defmodule MockBridge do
@@ -133,6 +134,23 @@ defmodule Men.Gateway.DispatchServerTest do
     end
   end
 
+  defmodule MockRuntimeAdapter do
+    def orchestrate(runtime_state, opts) do
+      if pid = Application.get_env(:men, :dispatch_server_test_pid) do
+        send(pid, {:runtime_adapter_called, runtime_state, opts})
+      end
+
+      {:ok,
+       %{
+         flag_state: Keyword.get(opts, :jit_flag, :jit_enabled),
+         advisor_decision: :execute,
+         snapshot_action: :injected,
+         rollback_reason: nil,
+         degraded?: false
+       }}
+    end
+  end
+
   setup do
     Application.put_env(:men, :dispatch_server_test_pid, self())
     Application.delete_env(:men, :dispatch_server_test_fail_final_egress)
@@ -156,6 +174,28 @@ defmodule Men.Gateway.DispatchServerTest do
     ]
 
     start_supervised!({DispatchServer, Keyword.merge(default_opts, opts)})
+  end
+
+  defp start_event_coord_server(opts \\ []) do
+    tables = [
+      dedup_table: :"dispatch_dedup_table_#{System.unique_integer([:positive, :monotonic])}",
+      inbox_table: :"dispatch_inbox_table_#{System.unique_integer([:positive, :monotonic])}",
+      scope_table: :"dispatch_scope_table_#{System.unique_integer([:positive, :monotonic])}"
+    ]
+
+    ReplStore.reset(tables)
+
+    start_dispatch_server(
+      Keyword.merge(
+        [
+          event_coordination_enabled: true,
+          wake_enabled: true,
+          rebuild_notify_pid: self(),
+          repl_store_opts: tables
+        ],
+        opts
+      )
+    )
   end
 
   defp start_session_coordinator(opts \\ []) do
@@ -240,6 +280,39 @@ defmodule Men.Gateway.DispatchServerTest do
     assert message.metadata.run_id == result.run_id
   end
 
+  test "dispatch 主链路会调用 runtime_adapter 并把 jit 字段写入 final metadata" do
+    server =
+      start_dispatch_server(runtime_adapter: MockRuntimeAdapter, jit_feature_flag: :smoke_mode)
+
+    event = %{
+      request_id: "req-jit-1",
+      payload: %{
+        goal: "验证 JIT 元数据",
+        policy: %{mode: :jit},
+        next_candidates: [%{id: "n1", title: "run"}]
+      },
+      mode_signals: %{premise_invalidated: false},
+      channel: "feishu",
+      user_id: "u-jit"
+    }
+
+    assert {:ok, result} = DispatchServer.dispatch(server, event)
+    assert result.request_id == "req-jit-1"
+
+    assert_receive {:runtime_adapter_called, runtime_state, opts}
+    assert runtime_state.goal == "验证 JIT 元数据"
+    assert Keyword.get(opts, :trace_id) == "req-jit-1"
+    assert Keyword.get(opts, :jit_flag) == :smoke_mode
+    assert Keyword.get(opts, :mode_signals) == %{premise_invalidated: false}
+
+    assert_receive {:egress_called, "feishu:u-jit", %FinalMessage{} = message}
+    assert message.metadata.jit_flag_state == :smoke_mode
+    assert message.metadata.jit_advisor_decision == :execute
+    assert message.metadata.jit_snapshot_action == :injected
+    assert message.metadata.jit_rollback_reason == nil
+    assert message.metadata.jit_degraded == false
+  end
+
   test "同 key 连续消息复用 runtime_session_id" do
     coordinator_name = start_session_coordinator()
 
@@ -309,6 +382,11 @@ defmodule Men.Gateway.DispatchServerTest do
 
     assert_receive {:bridge_called, "session_not_found_once",
                     %{run_id: "run-heal-1", session_key: runtime_session_id_1}}
+
+    assert_receive {:bridge_called, "session_not_found_once",
+                    %{run_id: "run-heal-1", session_key: runtime_session_id_2}}
+
+    assert runtime_session_id_1 != runtime_session_id_2
 
     refute_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1"}}
 
@@ -624,5 +702,183 @@ defmodule Men.Gateway.DispatchServerTest do
     assert error_result.code == "session_not_found"
     assert error_result.reason == "runtime session missing"
     assert_receive {:egress_called, "feishu:u-race-2", %ErrorMessage{code: "session_not_found"}}
+  end
+
+  describe "event coordination pipeline" do
+    test "agent_result 满足条件时写入 inbox 并触发一次 rebuild" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "agent_result",
+        source: "agent.agent_a",
+        session_key: "s1",
+        target: "control",
+        event_id: "E1",
+        version: 10,
+        ets_keys: ["agent.agent_a", "task.1"],
+        payload: %{result: "ok"}
+      }
+
+      assert {:ok, result} = DispatchServer.coordinate_event(server, event)
+      assert result.store_result == :ok
+      assert result.rebuild_triggered == true
+      assert_receive {:frame_rebuild_triggered, envelope}
+      assert envelope.event_id == "E1"
+    end
+
+    test "heartbeat 仅入 inbox 不触发 rebuild" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "heartbeat",
+        source: "agent.agent_a",
+        session_key: "s1",
+        target: "control",
+        event_id: "E2",
+        version: 1,
+        ets_keys: ["agent.agent_a", "hb"],
+        payload: %{signal: "alive"}
+      }
+
+      assert {:ok, result} = DispatchServer.coordinate_event(server, event)
+      assert result.store_result == :ok
+      assert result.rebuild_triggered == false
+      refute_receive {:frame_rebuild_triggered, _}
+    end
+
+    test "重复 event_id 仅首次触发 rebuild" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "agent_result",
+        source: "agent.agent_a",
+        session_key: "s1",
+        target: "control",
+        event_id: "E3",
+        version: 10,
+        ets_keys: ["agent.agent_a", "task.2"],
+        payload: %{result: "ok"}
+      }
+
+      assert {:ok, first} = DispatchServer.coordinate_event(server, event)
+      assert first.store_result == :ok
+      assert first.rebuild_triggered == true
+      assert_receive {:frame_rebuild_triggered, _}
+
+      assert {:ok, second} = DispatchServer.coordinate_event(server, event)
+      assert second.store_result == :duplicate
+      assert second.rebuild_triggered == false
+      refute_receive {:frame_rebuild_triggered, _}
+    end
+
+    test "feature flag 关闭时降级为 inbox_only，不触发 rebuild" do
+      server =
+        start_event_coord_server(
+          event_coordination_enabled: false,
+          wake_enabled: true
+        )
+
+      event = %{
+        type: "agent_result",
+        source: "agent.agent_a",
+        session_key: "s1",
+        target: "control",
+        event_id: "E4",
+        version: 10,
+        ets_keys: ["agent.agent_a", "task.3"],
+        payload: %{result: "ok"}
+      }
+
+      assert {:ok, result} = DispatchServer.coordinate_event(server, event)
+      assert result.store_result == :ok
+      assert result.rebuild_triggered == false
+      assert result.envelope.inbox_only == true
+      assert result.envelope.wake == false
+      refute_receive {:frame_rebuild_triggered, _}
+    end
+
+    test "并发同 event_id 仅触发一次回调" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "agent_result",
+        source: "agent.agent_a",
+        session_key: "s1",
+        target: "control",
+        event_id: "E5",
+        version: 10,
+        ets_keys: ["agent.agent_a", "task.concurrent"],
+        payload: %{result: "ok"}
+      }
+
+      tasks =
+        for _ <- 1..20 do
+          Task.async(fn -> DispatchServer.coordinate_event(server, event) end)
+        end
+
+      results = Enum.map(tasks, &Task.await(&1, 2_000))
+      assert Enum.any?(results, &match?({:ok, %{store_result: :ok}}, &1))
+      assert Enum.any?(results, &match?({:ok, %{store_result: :duplicate}}, &1))
+
+      assert_receive {:frame_rebuild_triggered, _}
+      refute_receive {:frame_rebuild_triggered, _}
+    end
+
+    test "tool 事件缺失 agent_id 时 fail-closed 拒绝入箱" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "tool_progress",
+        source: "tool.t1",
+        session_key: "s1",
+        target: "control",
+        event_id: "E6",
+        version: 1,
+        ets_keys: ["agent.agent_a", "tool.t1"],
+        payload: %{progress: 80},
+        meta: %{}
+      }
+
+      assert {:error, :acl_denied} = DispatchServer.coordinate_event(server, event)
+      refute_receive {:frame_rebuild_triggered, _}
+    end
+
+    test "未知 source 不应提升为 system，必须 fail-closed 拒绝" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "telemetry",
+        source: "external.partner",
+        session_key: "s1",
+        target: "control",
+        event_id: "E7",
+        version: 1,
+        ets_keys: ["external.partner", "telemetry"],
+        payload: %{trace: "x"}
+      }
+
+      assert {:error, :acl_denied} = DispatchServer.coordinate_event(server, event)
+      refute_receive {:frame_rebuild_triggered, _}
+    end
+
+    test "mode_state_machine 事件映射为 system 角色并可入箱" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "mode_backfill",
+        source: "mode_state_machine",
+        session_key: "mode_state_machine",
+        target: "runtime",
+        event_id: "MB1",
+        version: 0,
+        ets_keys: ["mode_backfill", "transition-1", "premise-1", "path-a"],
+        payload: %{transition_id: "transition-1", premise_id: "premise-1"}
+      }
+
+      assert {:ok, result} = DispatchServer.coordinate_event(server, event)
+      assert result.store_result == :ok
+      assert result.rebuild_triggered == false
+      refute_receive {:frame_rebuild_triggered, _}
+    end
   end
 end

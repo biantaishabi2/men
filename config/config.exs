@@ -26,9 +26,10 @@ config :men, Men.Channels.Egress.FeishuAdapter,
   base_url: "https://open.feishu.cn",
   bots: %{}
 
-config :men, Men.Channels.Egress.DingtalkRobotAdapter, stream_output_mode: :final_only
-
-config :men, Men.Channels.Egress.DingtalkCardAdapter, enabled: false
+config :men, :ops_policy,
+  telemetry_enabled: true,
+  db_source: Men.Ops.Policy.Source.DB,
+  config_source: Men.Ops.Policy.Source.Config
 
 # Configures the endpoint
 config :men, MenWeb.Endpoint,

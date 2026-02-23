@@ -125,7 +125,67 @@ config :men, Men.Gateway.SessionCoordinator,
       [:runtime_session_not_found]
     )
 
-config :men, Men.Gateway.DispatchServer, bridge_adapter: runtime_bridge_impl
+default_gateway_policy =
+  case System.get_env("GATEWAY_BOOTSTRAP_POLICY_JSON") do
+    nil ->
+      %{
+        "acl" => %{
+          "main" => %{
+            "read" => ["global.", "agent.", "shared.", "inbox."],
+            "write" => ["global.control.", "inbox."]
+          },
+          "child" => %{
+            "read" => ["agent.$agent_id.", "shared.evidence.agent.$agent_id.", "inbox."],
+            "write" => ["agent.$agent_id.", "shared.evidence.agent.$agent_id.", "inbox."]
+          },
+          "tool" => %{
+            "read" => ["agent.$agent_id.", "shared.evidence.agent.$agent_id.", "inbox."],
+            "write" => ["inbox."]
+          },
+          "system" => %{"read" => [""], "write" => [""]}
+        },
+        "wake" => %{
+          "must_wake" => ["agent_result", "agent_error", "policy_changed"],
+          "inbox_only" => ["heartbeat", "tool_progress", "telemetry"]
+        },
+        "dedup_ttl_ms" => 60_000,
+        "version" => 0,
+        "policy_version" => "fallback"
+      }
+
+    raw ->
+      case Jason.decode(raw) do
+        {:ok, value} when is_map(value) -> value
+        _ -> %{}
+      end
+  end
+
+config :men, :ops_policy,
+  cache_ttl_ms: parse_positive_integer_env.("OPS_POLICY_CACHE_TTL_MS", 60_000),
+  reconcile_interval_ms: parse_positive_integer_env.("OPS_POLICY_RECONCILE_INTERVAL_MS", 30_000),
+  reconcile_jitter_ms: parse_non_negative_integer_env.("OPS_POLICY_RECONCILE_JITTER_MS", 5_000),
+  reconcile_failure_threshold:
+    parse_positive_integer_env.("OPS_POLICY_RECONCILE_FAILURE_THRESHOLD", 3),
+  telemetry_enabled: parse_boolean_env.("OPS_POLICY_TELEMETRY_ENABLED", true),
+  default_policies: %{
+    {"default", "prod", "gateway", "gateway_runtime"} => default_gateway_policy
+  }
+
+config :men, Men.Gateway.OpsPolicyProvider,
+  cache_ttl_ms: parse_positive_integer_env.("GATEWAY_POLICY_CACHE_TTL_MS", 300_000),
+  bootstrap_policy: default_gateway_policy
+
+config :men, Men.Gateway.DispatchServer,
+  agent_loop_enabled: parse_boolean_env.("GATEWAY_AGENT_LOOP_ENABLED", true),
+  prompt_frame_injection_enabled:
+    parse_boolean_env.("GATEWAY_PROMPT_FRAME_INJECTION_ENABLED", false),
+  frame_budget_tokens: parse_positive_integer_env.("GATEWAY_FRAME_BUDGET_TOKENS", 16_000),
+  frame_budget_messages: parse_positive_integer_env.("GATEWAY_FRAME_BUDGET_MESSAGES", 20),
+  receipt_recent_limit: parse_positive_integer_env.("GATEWAY_RECEIPT_RECENT_LIMIT", 20),
+  event_bus_topic: System.get_env("GATEWAY_EVENT_BUS_TOPIC") || "gateway_events"
+
+# 钉钉机器人回发配置（生产可直接由环境变量驱动）。
+dingtalk_webhook_url = System.get_env("DINGTALK_ROBOT_WEBHOOK_URL")
 
 config :men, :zcpg_cutover,
   enabled:
