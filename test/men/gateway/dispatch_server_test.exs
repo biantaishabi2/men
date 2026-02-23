@@ -756,5 +756,25 @@ defmodule Men.Gateway.DispatchServerTest do
       assert {:error, :acl_denied} = DispatchServer.coordinate_event(server, event)
       refute_receive {:frame_rebuild_triggered, _}
     end
+
+    test "mode_state_machine 事件映射为 system 角色并可入箱" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "mode_backfill",
+        source: "mode_state_machine",
+        session_key: "mode_state_machine",
+        target: "runtime",
+        event_id: "MB1",
+        version: 0,
+        ets_keys: ["mode_backfill", "transition-1", "premise-1", "path-a"],
+        payload: %{transition_id: "transition-1", premise_id: "premise-1"}
+      }
+
+      assert {:ok, result} = DispatchServer.coordinate_event(server, event)
+      assert result.store_result == :ok
+      assert result.rebuild_triggered == false
+      refute_receive {:frame_rebuild_triggered, _}
+    end
   end
 end

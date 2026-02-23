@@ -181,15 +181,33 @@ defmodule Men.Gateway.ReplStore do
   defp put_dedup(table, envelope, dedup_ttl_ms) do
     key = dedup_key(envelope)
     now = now_ms()
+    expire_at = now + dedup_ttl_ms
 
-    case :ets.lookup(table, key) do
-      [{^key, expire_at}] when is_integer(expire_at) and expire_at >= now ->
-        {:ok, true}
-
-      _ ->
-        :ets.insert(table, {key, now + dedup_ttl_ms})
+    case :ets.insert_new(table, {key, expire_at}) do
+      true ->
         {:ok, false}
+
+      false ->
+        case :ets.lookup(table, key) do
+          [{^key, current_expire_at}] when is_integer(current_expire_at) and current_expire_at < now ->
+            replace_expired_dedup(table, key, current_expire_at, expire_at, now)
+
+          [{^key, _current_expire_at}] ->
+            {:ok, true}
+
+          _ ->
+            put_dedup(table, envelope, dedup_ttl_ms)
+        end
     end
+  end
+
+  defp replace_expired_dedup(table, key, current_expire_at, expire_at, now) do
+    replaced =
+      :ets.select_replace(table, [
+        {{key, :"$1"}, [{:==, :"$1", current_expire_at}, {:<, :"$1", now}], [{{key, expire_at}}]}
+      ])
+
+    if replaced == 1, do: {:ok, false}, else: {:ok, true}
   end
 
   defp cleanup_expired_dedup(table) do

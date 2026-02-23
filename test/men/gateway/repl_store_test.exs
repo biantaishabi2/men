@@ -52,6 +52,34 @@ defmodule Men.Gateway.ReplStoreTest do
     assert status in [:stored, :idempotent]
   end
 
+  test "并发同事件去重是原子的，仅一次非 duplicate 接受", %{opts: opts} do
+    envelope = envelope!("e-concurrent", 1)
+
+    results =
+      1..40
+      |> Task.async_stream(fn _ -> ReplStore.put_inbox(envelope, @policy, opts) end,
+        max_concurrency: 40,
+        ordered: false,
+        timeout: 2_000
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    accepted_count =
+      Enum.count(results, fn
+        {:ok, %{status: status}} when status in [:stored, :idempotent, :older_drop] -> true
+        _ -> false
+      end)
+
+    duplicate_count =
+      Enum.count(results, fn
+        {:ok, %{status: :duplicate, duplicate: true}} -> true
+        _ -> false
+      end)
+
+    assert accepted_count == 1
+    assert duplicate_count == 39
+  end
+
   test "version newer/equal/older 三分支", %{opts: opts} do
     assert {:ok, %{status: :stored}} = ReplStore.put_inbox(envelope!("e2", 2), @policy, opts)
     assert {:ok, %{status: :stored}} = ReplStore.put_inbox(envelope!("e3", 3), @policy, opts)

@@ -434,6 +434,9 @@ defmodule Men.Gateway.DispatchServer do
     source = envelope.source || ""
 
     cond do
+      source == "mode_state_machine" ->
+        %{role: :system, session_key: envelope.session_key}
+
       String.starts_with?(source, "agent.") or String.starts_with?(source, "child.") ->
         [_, agent_id] = String.split(source, ".", parts: 2)
         %{role: :child, agent_id: agent_id, session_key: envelope.session_key}
