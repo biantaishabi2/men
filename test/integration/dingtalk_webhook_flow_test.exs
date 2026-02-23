@@ -123,13 +123,25 @@ defmodule Men.Integration.DingtalkWebhookFlowTest do
     assert accepted?(post_signed(conn, payload_1))
     assert accepted?(post_signed(build_conn(), payload_2))
 
-    assert_receive {:bridge_called, _, %{external_session_key: "dingtalk:user-integration", session_key: runtime_session_id_1}}
-    assert_receive {:bridge_called, _, %{external_session_key: "dingtalk:user-integration", session_key: runtime_session_id_2}}
+    assert_receive {:bridge_called, _,
+                    %{
+                      external_session_key: "dingtalk:user-integration",
+                      session_key: runtime_session_id_1
+                    }}
+
+    assert_receive {:bridge_called, _,
+                    %{
+                      external_session_key: "dingtalk:user-integration",
+                      session_key: runtime_session_id_2
+                    }}
 
     assert runtime_session_id_1 == runtime_session_id_2
 
-    assert_receive {:egress_called, "dingtalk:user-integration", %Men.Channels.Egress.Messages.FinalMessage{}}
-    assert_receive {:egress_called, "dingtalk:user-integration", %Men.Channels.Egress.Messages.FinalMessage{}}
+    assert_receive {:egress_called, "dingtalk:user-integration",
+                    %Men.Channels.Egress.Messages.FinalMessage{}}
+
+    assert_receive {:egress_called, "dingtalk:user-integration",
+                    %Men.Channels.Egress.Messages.FinalMessage{}}
   end
 
   test "不同 session_key 并发 webhook 隔离", %{conn: conn} do
@@ -154,23 +166,36 @@ defmodule Men.Integration.DingtalkWebhookFlowTest do
     assert Enum.map(contexts, & &1.external_session_key) == ["dingtalk:user-a", "dingtalk:user-b"]
     assert Enum.uniq(Enum.map(contexts, & &1.session_key)) |> length() == 2
 
-    assert_receive {:egress_called, "dingtalk:user-a", %Men.Channels.Egress.Messages.FinalMessage{}}
-    assert_receive {:egress_called, "dingtalk:user-b", %Men.Channels.Egress.Messages.FinalMessage{}}
+    assert_receive {:egress_called, "dingtalk:user-a",
+                    %Men.Channels.Egress.Messages.FinalMessage{}}
+
+    assert_receive {:egress_called, "dingtalk:user-b",
+                    %Men.Channels.Egress.Messages.FinalMessage{}}
+
     _ = conn
   end
 
   test "session_not_found 在 webhook 主链路单次自愈且不重复出站", %{conn: conn} do
-    event_payload = payload("evt-integration-5", "user-heal", "conv-heal", "session_not_found_once")
+    event_payload =
+      payload("evt-integration-5", "user-heal", "conv-heal", "session_not_found_once")
 
     assert accepted?(post_signed(conn, event_payload))
 
     assert_receive {:bridge_called, prompt, %{run_id: run_id, session_key: runtime_session_id_1}}
-    assert_receive {:bridge_called, ^prompt, %{run_id: ^run_id, session_key: runtime_session_id_2}}
+
+    assert_receive {:bridge_called, ^prompt,
+                    %{run_id: ^run_id, session_key: runtime_session_id_2}}
+
     assert runtime_session_id_1 != runtime_session_id_2
 
-    assert_receive {:egress_called, "dingtalk:user-heal", %Men.Channels.Egress.Messages.FinalMessage{}}
-    refute_receive {:egress_called, "dingtalk:user-heal", %Men.Channels.Egress.Messages.FinalMessage{}}
-    refute_receive {:egress_called, "dingtalk:user-heal", %Men.Channels.Egress.Messages.ErrorMessage{}}
+    assert_receive {:egress_called, "dingtalk:user-heal",
+                    %Men.Channels.Egress.Messages.FinalMessage{}}
+
+    refute_receive {:egress_called, "dingtalk:user-heal",
+                    %Men.Channels.Egress.Messages.FinalMessage{}}
+
+    refute_receive {:egress_called, "dingtalk:user-heal",
+                    %Men.Channels.Egress.Messages.ErrorMessage{}}
   end
 
   test "bridge 失败不影响 webhook 立即 ACK，后台按既有语义 error 回写", %{conn: conn} do
@@ -179,7 +204,10 @@ defmodule Men.Integration.DingtalkWebhookFlowTest do
     assert accepted?(post_signed(conn, event_payload))
 
     assert_receive {:bridge_called, _, %{external_session_key: "dingtalk:user-error"}}
-    assert_receive {:egress_called, "dingtalk:user-error", %Men.Channels.Egress.Messages.ErrorMessage{} = message}
+
+    assert_receive {:egress_called, "dingtalk:user-error",
+                    %Men.Channels.Egress.Messages.ErrorMessage{} = message}
+
     assert message.code == "BRIDGE_FAIL"
   end
 
