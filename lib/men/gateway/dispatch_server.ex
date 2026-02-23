@@ -10,6 +10,8 @@ defmodule Men.Gateway.DispatchServer do
   alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
   alias Men.Gateway.EventEnvelope
   alias Men.Gateway.InboxStore
+  alias Men.Gateway.OpsPolicyProvider
+  alias Men.Gateway.ReplStore
   alias Men.Gateway.Runtime.Adapter
   alias Men.Gateway.Runtime.ModeStateMachine
   alias Men.Gateway.SessionCoordinator
@@ -28,9 +30,10 @@ defmodule Men.Gateway.DispatchServer do
           session_rebuild_retry_enabled: boolean(),
           event_coordination_enabled: boolean(),
           wake_enabled: boolean(),
-          wake_policy_overrides: map(),
-          wake_policy_strict_inbox_priority: boolean(),
+          ops_policy_provider: module(),
+          ops_policy_identity: map(),
           inbox_store_opts: keyword(),
+          repl_store_opts: keyword(),
           rebuild_target: GenServer.server() | nil,
           rebuild_notify_pid: pid() | nil,
           mode_state_machine_enabled: boolean(),
@@ -129,18 +132,31 @@ defmodule Men.Gateway.DispatchServer do
           Keyword.get(config, :event_coordination_enabled, true)
         ),
       wake_enabled: Keyword.get(opts, :wake_enabled, Keyword.get(config, :wake_enabled, true)),
-      wake_policy_overrides:
-        opts
-        |> Keyword.get(:wake_policy_overrides, Keyword.get(config, :wake_policy_overrides, %{}))
-        |> normalize_overrides(),
-      wake_policy_strict_inbox_priority:
+      ops_policy_provider:
         Keyword.get(
           opts,
-          :wake_policy_strict_inbox_priority,
-          Keyword.get(config, :wake_policy_strict_inbox_priority, true)
+          :ops_policy_provider,
+          Keyword.get(config, :ops_policy_provider, OpsPolicyProvider)
         ),
+      ops_policy_identity:
+        opts
+        |> Keyword.get(
+          :ops_policy_identity,
+          Keyword.get(config, :ops_policy_identity, %{
+            tenant: "default",
+            env: "prod",
+            scope: "gateway"
+          })
+        )
+        |> normalize_overrides(),
       inbox_store_opts:
         Keyword.get(opts, :inbox_store_opts, Keyword.get(config, :inbox_store_opts, [])),
+      repl_store_opts:
+        Keyword.get(
+          opts,
+          :repl_store_opts,
+          Keyword.get(config, :repl_store_opts, Keyword.get(opts, :inbox_store_opts, []))
+        ),
       rebuild_target: Keyword.get(opts, :rebuild_target, Keyword.get(config, :rebuild_target)),
       rebuild_notify_pid:
         Keyword.get(opts, :rebuild_notify_pid, Keyword.get(config, :rebuild_notify_pid)),
@@ -233,28 +249,25 @@ defmodule Men.Gateway.DispatchServer do
 
   defp run_event_coordination(state, inbound_event, runtime_overrides) do
     with {:ok, envelope} <- EventEnvelope.normalize(inbound_event),
-         :ok <-
-           emit_telemetry([:event, :normalized], %{
-             event_id: envelope.event_id,
-             type: envelope.type
-           }),
-         {:ok, decided_envelope, decision} <- decide_policy(state, envelope, runtime_overrides),
-         :ok <-
-           emit_telemetry([:policy, :decided], %{
-             event_id: decided_envelope.event_id,
-             type: decided_envelope.type,
-             wake: decision.wake,
-             inbox_only: decision.inbox_only
-           }),
-         {:ok, store_tag, store_envelope} <-
-           store_inbox(decided_envelope, state.inbox_store_opts),
-         :ok <- emit_store_telemetry(store_tag, store_envelope) do
-      rebuild_triggered = maybe_trigger_rebuild(state, store_tag, store_envelope)
+         {:ok, policy} <- load_runtime_policy(state, runtime_overrides),
+         :ok <- emit_event_ingested_log(envelope, policy),
+         {:ok, decided_envelope, decision} <- WakePolicy.decide(envelope, policy),
+         :ok <- emit_wake_decision_log(decided_envelope, decision),
+         {:ok, store_result} <-
+           ReplStore.put_inbox(
+             decided_envelope,
+             policy,
+             Keyword.merge(
+               state.repl_store_opts,
+               actor: actor_from_envelope(decided_envelope)
+             )
+           ) do
+      rebuild_triggered = maybe_trigger_rebuild(state, store_result.status, decided_envelope)
 
       {:ok,
        %{
-         envelope: store_envelope,
-         store_result: store_tag,
+         envelope: decided_envelope,
+         store_result: normalize_store_result(store_result.status),
          rebuild_triggered: rebuild_triggered
        }}
     else
@@ -263,46 +276,67 @@ defmodule Men.Gateway.DispatchServer do
     end
   end
 
-  defp decide_policy(state, envelope, runtime_overrides) do
-    policy_envelope = enforce_disabled_envelope(envelope, state.event_coordination_enabled)
+  defp load_runtime_policy(state, runtime_overrides) do
+    overrides = normalize_overrides(runtime_overrides)
 
-    coordination_overrides =
-      runtime_overrides
-      |> normalize_overrides()
-      |> maybe_force_inbox_only(state.event_coordination_enabled)
-      |> Map.put_new(:strict_inbox_priority, state.wake_policy_strict_inbox_priority)
+    identity =
+      state.ops_policy_identity
+      |> Map.merge(Map.get(overrides, :ops_policy_identity, %{}))
 
-    merged_overrides = Map.merge(state.wake_policy_overrides, coordination_overrides)
-    WakePolicy.decide(policy_envelope, merged_overrides)
-  end
-
-  defp store_inbox(envelope, inbox_store_opts) do
-    case InboxStore.put(envelope, inbox_store_opts) do
-      {:ok, accepted} -> {:ok, :ok, accepted}
-      {:duplicate, accepted} -> {:ok, :duplicate, accepted}
-      {:stale, accepted} -> {:ok, :stale, accepted}
-      {:error, reason} -> {:error, reason}
+    with {:ok, policy} <- state.ops_policy_provider.get_policy(identity: identity) do
+      if state.event_coordination_enabled do
+        {:ok, policy}
+      else
+        {:ok, disable_wake_policy(policy)}
+      end
     end
   end
 
-  defp emit_store_telemetry(:ok, _envelope), do: :ok
+  defp disable_wake_policy(policy) do
+    wake = %{
+      "must_wake" => [],
+      "inbox_only" => [
+        "agent_result",
+        "agent_error",
+        "policy_changed",
+        "heartbeat",
+        "tool_progress",
+        "telemetry",
+        "mode_backfill"
+      ]
+    }
 
-  defp emit_store_telemetry(:duplicate, envelope) do
-    emit_telemetry([:inbox, :duplicate], %{event_id: envelope.event_id, type: envelope.type})
+    Map.put(policy, :wake, wake)
   end
 
-  defp emit_store_telemetry(:stale, envelope) do
-    emit_telemetry([:inbox, :stale], %{
+  defp emit_event_ingested_log(envelope, policy) do
+    log_payload("event_ingested", %{
       event_id: envelope.event_id,
+      session_key: envelope.session_key,
       type: envelope.type,
-      version: envelope.version
+      source: envelope.source,
+      wake: envelope.wake,
+      inbox_only: envelope.inbox_only,
+      decision_reason: nil,
+      policy_version: policy.policy_version
     })
   end
 
-  defp emit_store_telemetry(_other, _envelope), do: :ok
+  defp emit_wake_decision_log(envelope, decision) do
+    log_payload("wake_decision", %{
+      event_id: envelope.event_id,
+      session_key: envelope.session_key,
+      type: envelope.type,
+      source: envelope.source,
+      wake: decision.wake,
+      inbox_only: decision.inbox_only,
+      decision_reason: decision.decision_reason,
+      policy_version: decision.policy_version
+    })
+  end
 
   # 触发条件必须同时满足：入库成功 + wake=true + inbox_only=false + 功能开关开启。
-  defp maybe_trigger_rebuild(state, :ok, envelope) do
+  defp maybe_trigger_rebuild(state, :stored, envelope) do
     enabled? =
       state.event_coordination_enabled and
         state.wake_enabled and
@@ -323,7 +357,7 @@ defmodule Men.Gateway.DispatchServer do
           emit_telemetry([:dispatch, :rebuild_skipped], %{
             event_id: envelope.event_id,
             type: envelope.type,
-            store_result: :ok,
+            store_result: :stored,
             wake: envelope.wake,
             inbox_only: envelope.inbox_only,
             event_coordination_enabled: state.event_coordination_enabled,
@@ -337,7 +371,7 @@ defmodule Men.Gateway.DispatchServer do
       emit_telemetry([:dispatch, :rebuild_skipped], %{
         event_id: envelope.event_id,
         type: envelope.type,
-        store_result: :ok,
+        store_result: :stored,
         wake: envelope.wake,
         inbox_only: envelope.inbox_only,
         event_coordination_enabled: state.event_coordination_enabled,
@@ -396,19 +430,39 @@ defmodule Men.Gateway.DispatchServer do
   defp normalize_overrides(overrides) when is_map(overrides), do: overrides
   defp normalize_overrides(_), do: %{}
 
-  # 关闭总线时强制降级到 inbox_only，保证事件仍可入箱且不触发重建。
-  defp enforce_disabled_envelope(envelope, true), do: envelope
+  defp actor_from_envelope(envelope) do
+    source = envelope.source || ""
 
-  defp enforce_disabled_envelope(envelope, false) do
-    %EventEnvelope{envelope | wake: nil, inbox_only: nil, force_wake: false}
+    cond do
+      String.starts_with?(source, "agent.") or String.starts_with?(source, "child.") ->
+        [_, agent_id] = String.split(source, ".", parts: 2)
+        %{role: :child, agent_id: agent_id, session_key: envelope.session_key}
+
+      String.starts_with?(source, "tool.") ->
+        [_, tool_id | _] = String.split(source, ".")
+
+        %{
+          role: :tool,
+          tool_id: tool_id,
+          agent_id: Map.get(envelope.meta, :agent_id) || "unknown_agent",
+          session_key: envelope.session_key
+        }
+
+      true ->
+        %{role: :system, session_key: envelope.session_key}
+    end
   end
 
-  defp maybe_force_inbox_only(overrides, true), do: overrides
+  defp normalize_store_result(:stored), do: :ok
+  defp normalize_store_result(:duplicate), do: :duplicate
+  defp normalize_store_result(:idempotent), do: :duplicate
+  defp normalize_store_result(:older_drop), do: :stale
 
-  defp maybe_force_inbox_only(overrides, false) do
-    overrides
-    |> Map.put(:wake, false)
-    |> Map.put(:inbox_only, true)
+  defp log_payload(event_name, payload) do
+    Logger.info("#{event_name} #{Jason.encode!(payload)}")
+    :ok
+  rescue
+    _ -> :ok
   end
 
   # 每轮调度先做模式状态机决策，再进入 runtime bridge。
@@ -594,11 +648,11 @@ defmodule Men.Gateway.DispatchServer do
       type: "mode_backfill",
       source: "mode_state_machine",
       target: "runtime",
+      session_key: "mode_state_machine",
       event_id: "#{task.transition_id}:#{task.premise_id}:#{critical_path_key}",
       version: 0,
       wake: false,
       inbox_only: true,
-      force_wake: false,
       ets_keys: ["mode_backfill", task.transition_id, task.premise_id, critical_path_key],
       payload: task,
       ts: System.system_time(:millisecond),

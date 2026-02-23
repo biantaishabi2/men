@@ -3,7 +3,7 @@ defmodule Men.Gateway.DispatchServerTest do
 
   alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
   alias Men.Gateway.DispatchServer
-  alias Men.Gateway.InboxStore
+  alias Men.Gateway.ReplStore
   alias Men.Gateway.SessionCoordinator
 
   defmodule MockBridge do
@@ -151,11 +151,12 @@ defmodule Men.Gateway.DispatchServerTest do
 
   defp start_event_coord_server(opts \\ []) do
     tables = [
-      event_table: :"dispatch_event_table_#{System.unique_integer([:positive, :monotonic])}",
+      dedup_table: :"dispatch_dedup_table_#{System.unique_integer([:positive, :monotonic])}",
+      inbox_table: :"dispatch_inbox_table_#{System.unique_integer([:positive, :monotonic])}",
       scope_table: :"dispatch_scope_table_#{System.unique_integer([:positive, :monotonic])}"
     ]
 
-    InboxStore.reset(tables)
+    ReplStore.reset(tables)
 
     start_dispatch_server(
       Keyword.merge(
@@ -163,7 +164,7 @@ defmodule Men.Gateway.DispatchServerTest do
           event_coordination_enabled: true,
           wake_enabled: true,
           rebuild_notify_pid: self(),
-          inbox_store_opts: tables
+          repl_store_opts: tables
         ],
         opts
       )
@@ -605,13 +606,12 @@ defmodule Men.Gateway.DispatchServerTest do
 
       event = %{
         type: "agent_result",
-        source: "agent.1",
+        source: "agent.agent_a",
+        session_key: "s1",
         target: "control",
         event_id: "E1",
         version: 10,
-        wake: true,
-        inbox_only: false,
-        ets_keys: ["agent.1", "task.1"],
+        ets_keys: ["agent.agent_a", "task.1"],
         payload: %{result: "ok"}
       }
 
@@ -627,13 +627,13 @@ defmodule Men.Gateway.DispatchServerTest do
 
       event = %{
         type: "heartbeat",
-        source: "agent.1",
+        source: "agent.agent_a",
+        session_key: "s1",
         target: "control",
         event_id: "E2",
         version: 1,
-        wake: false,
-        inbox_only: true,
-        ets_keys: ["agent.1", "hb"]
+        ets_keys: ["agent.agent_a", "hb"],
+        payload: %{signal: "alive"}
       }
 
       assert {:ok, result} = DispatchServer.coordinate_event(server, event)
@@ -647,13 +647,13 @@ defmodule Men.Gateway.DispatchServerTest do
 
       event = %{
         type: "agent_result",
-        source: "agent.1",
+        source: "agent.agent_a",
+        session_key: "s1",
         target: "control",
         event_id: "E3",
         version: 10,
-        wake: true,
-        inbox_only: false,
-        ets_keys: ["agent.1", "task.2"]
+        ets_keys: ["agent.agent_a", "task.2"],
+        payload: %{result: "ok"}
       }
 
       assert {:ok, first} = DispatchServer.coordinate_event(server, event)
@@ -671,20 +671,18 @@ defmodule Men.Gateway.DispatchServerTest do
       server =
         start_event_coord_server(
           event_coordination_enabled: false,
-          wake_enabled: true,
-          wake_policy_strict_inbox_priority: false
+          wake_enabled: true
         )
 
       event = %{
         type: "agent_result",
-        source: "agent.1",
+        source: "agent.agent_a",
+        session_key: "s1",
         target: "control",
         event_id: "E4",
         version: 10,
-        wake: true,
-        inbox_only: false,
-        force_wake: true,
-        ets_keys: ["agent.1", "task.3"]
+        ets_keys: ["agent.agent_a", "task.3"],
+        payload: %{result: "ok"}
       }
 
       assert {:ok, result} = DispatchServer.coordinate_event(server, event)
@@ -692,6 +690,33 @@ defmodule Men.Gateway.DispatchServerTest do
       assert result.rebuild_triggered == false
       assert result.envelope.inbox_only == true
       assert result.envelope.wake == false
+      refute_receive {:frame_rebuild_triggered, _}
+    end
+
+    test "并发同 event_id 仅触发一次回调" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "agent_result",
+        source: "agent.agent_a",
+        session_key: "s1",
+        target: "control",
+        event_id: "E5",
+        version: 10,
+        ets_keys: ["agent.agent_a", "task.concurrent"],
+        payload: %{result: "ok"}
+      }
+
+      tasks =
+        for _ <- 1..20 do
+          Task.async(fn -> DispatchServer.coordinate_event(server, event) end)
+        end
+
+      results = Enum.map(tasks, &Task.await(&1, 2_000))
+      assert Enum.any?(results, &match?({:ok, %{store_result: :ok}}, &1))
+      assert Enum.any?(results, &match?({:ok, %{store_result: :duplicate}}, &1))
+
+      assert_receive {:frame_rebuild_triggered, _}
       refute_receive {:frame_rebuild_triggered, _}
     end
   end
