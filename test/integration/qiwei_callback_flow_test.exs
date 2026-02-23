@@ -107,6 +107,7 @@ defmodule Men.Integration.QiweiCallbackFlowTest do
       bot_name: "MenBot",
       bot_user_id: "bot_user_id",
       reply_require_mention: true,
+      callback_timeout_ms: 1_234,
       dispatch_server: server_name,
       idempotency_ttl_seconds: 120
     )
@@ -129,7 +130,8 @@ defmodule Men.Integration.QiweiCallbackFlowTest do
       )
 
     assert response(conn, 200) =~ "<![CDATA[zcpg-final]]>"
-    assert_receive {:zcpg_called, _, _}
+    assert_receive {:zcpg_called, _, zcpg_context}
+    assert zcpg_context.timeout_ms == 1_234
     refute_receive {:legacy_called, _, _}
   end
 

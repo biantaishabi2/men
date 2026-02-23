@@ -154,6 +154,7 @@ config :men, MenWeb.Webhooks.QiweiController,
   bot_name: System.get_env("QIWEI_BOT_NAME"),
   bot_user_id: System.get_env("QIWEI_BOT_USER_ID"),
   reply_require_mention: parse_boolean_env.("QIWEI_REPLY_REQUIRE_MENTION", true),
+  callback_timeout_ms: parse_positive_integer_env.("QIWEI_CALLBACK_TIMEOUT_MS", 8_000),
   idempotency_ttl_seconds: parse_positive_integer_env.("QIWEI_IDEMPOTENCY_TTL_SECONDS", 120),
   idempotency_backend:
     parse_module_env.(

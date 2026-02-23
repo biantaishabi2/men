@@ -67,7 +67,13 @@ defmodule MenWeb.Webhooks.QiweiController do
         bot_name: config.bot_name
       ]
 
-      inbound_event = enrich_mention_flags(inbound_event, config.reply_adapter, reply_opts)
+      inbound_event =
+        enrich_mention_flags(
+          inbound_event,
+          config.reply_adapter,
+          reply_opts,
+          config.callback_timeout_ms
+        )
 
       response_payload =
         config.idempotency.with_idempotency(
@@ -135,7 +141,7 @@ defmodule MenWeb.Webhooks.QiweiController do
     DispatchServer.dispatch(server_name, inbound_event)
   end
 
-  defp enrich_mention_flags(inbound_event, reply_adapter, reply_opts) do
+  defp enrich_mention_flags(inbound_event, reply_adapter, reply_opts, callback_timeout_ms) do
     payload = Map.get(inbound_event, :payload, %{})
     metadata = Map.get(inbound_event, :metadata, %{})
     msg_type = Map.get(payload, :msg_type)
@@ -149,17 +155,26 @@ defmodule MenWeb.Webhooks.QiweiController do
 
     mention_required = Keyword.get(reply_opts, :require_mention, true)
 
-    inbound_event
-    |> Map.put(:payload, Map.put(payload, :mentioned, mentioned))
-    |> Map.put(
-      :metadata,
-      Map.merge(metadata, %{
+    next_metadata =
+      metadata
+      |> Map.merge(%{
         mentioned: mentioned,
         mention_required: mention_required,
         disable_legacy_fallback: true
       })
-    )
+      |> maybe_put_callback_timeout(callback_timeout_ms)
+
+    inbound_event
+    |> Map.put(:payload, Map.put(payload, :mentioned, mentioned))
+    |> Map.put(:metadata, next_metadata)
   end
+
+  defp maybe_put_callback_timeout(metadata, timeout_ms)
+       when is_map(metadata) and is_integer(timeout_ms) and timeout_ms > 0 do
+    Map.put(metadata, :callback_timeout_ms, timeout_ms)
+  end
+
+  defp maybe_put_callback_timeout(metadata, _timeout_ms), do: metadata
 
   defp respond(conn, %{type: :xml, body: body}) when is_binary(body) do
     conn
@@ -364,6 +379,7 @@ defmodule MenWeb.Webhooks.QiweiController do
       bot_name: Keyword.get(app_config, :bot_name, System.get_env("QIWEI_BOT_NAME")),
       bot_user_id: Keyword.get(app_config, :bot_user_id, System.get_env("QIWEI_BOT_USER_ID")),
       reply_require_mention: Keyword.get(app_config, :reply_require_mention, true),
+      callback_timeout_ms: Keyword.get(app_config, :callback_timeout_ms),
       dispatch_server: Keyword.get(app_config, :dispatch_server, DispatchServer),
       ingress_adapter: Keyword.get(app_config, :ingress_adapter, QiweiAdapter),
       reply_adapter: Keyword.get(app_config, :reply_adapter, QiweiPassiveReplyAdapter),

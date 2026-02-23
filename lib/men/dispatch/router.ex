@@ -135,6 +135,7 @@ defmodule Men.Dispatch.Router do
       trace_id: request_id
     }
     |> maybe_put_event_callback(state, context)
+    |> maybe_put_callback_timeout(context)
   end
 
   defp maybe_put_event_callback(context_map, %{streaming_enabled: true} = state, context) do
@@ -142,6 +143,19 @@ defmodule Men.Dispatch.Router do
   end
 
   defp maybe_put_event_callback(context_map, _state, _context), do: context_map
+
+  defp maybe_put_callback_timeout(context_map, context) do
+    timeout_ms =
+      context
+      |> Map.get(:metadata, %{})
+      |> map_value(:callback_timeout_ms, nil)
+
+    if is_integer(timeout_ms) and timeout_ms > 0 do
+      Map.put(context_map, :timeout_ms, timeout_ms)
+    else
+      context_map
+    end
+  end
 
   defp resolve_runtime_session_id(%{session_coordinator_enabled: false}, session_key),
     do: session_key
