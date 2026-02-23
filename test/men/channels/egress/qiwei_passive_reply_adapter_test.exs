@@ -1,103 +1,97 @@
 defmodule Men.Channels.Egress.QiweiPassiveReplyAdapterTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Men.Channels.Egress.QiweiPassiveReplyAdapter
 
-  test "at_list 命中 bot_user_id 优先回复" do
+  setup do
+    original = Application.get_env(:men, :qiwei, [])
+
+    Application.put_env(:men, :qiwei,
+      bot_user_id: "bot_user_1",
+      bot_name: "men-bot",
+      reply_require_mention: true,
+      reply_max_chars: 20
+    )
+
+    on_exit(fn -> Application.put_env(:men, :qiwei, original) end)
+    :ok
+  end
+
+  test "@ 命中优先级：结构化 at 命中 bot_user_id 时回复 XML" do
     event = %{
       payload: %{
         msg_type: "text",
-        from_user: "user_1",
-        corp_id: "wwcorp",
-        content: "你好",
-        at_user_ids: ["bot_user", "other"]
+        from_user: "u1",
+        to_user: "corp1",
+        content: "hello",
+        at_list: ["bot_user_1"]
       }
     }
 
-    assert {:xml, xml} =
-             QiweiPassiveReplyAdapter.build(
-               event,
-               {:ok, %{payload: %{text: "reply-ok"}}},
-               require_mention: true,
-               bot_user_id: "bot_user"
-             )
+    dispatch = {:ok, %{payload: %{text: "final-reply"}}}
 
+    assert {:xml, xml} = QiweiPassiveReplyAdapter.build(event, dispatch)
+    assert xml =~ "<ToUserName><![CDATA[u1]]></ToUserName>"
+    assert xml =~ "<FromUserName><![CDATA[corp1]]></FromUserName>"
     assert xml =~ "<MsgType><![CDATA[text]]></MsgType>"
-    assert xml =~ "<![CDATA[reply-ok]]>"
+    assert xml =~ "<Content><![CDATA[final-reply]]></Content>"
   end
 
-  test "文本 @bot_name 兜底命中" do
+  test "文本兜底：未命中结构化 at 但命中 @QIWEI_BOT_NAME 仍回复" do
     event = %{
       payload: %{
         msg_type: "text",
-        from_user: "user_2",
-        corp_id: "wwcorp",
-        content: "@MenBot 帮我查下",
-        at_user_ids: []
+        from_user: "u2",
+        to_user: "corp2",
+        content: "@men-bot 你好",
+        at_list: []
       }
     }
 
-    assert QiweiPassiveReplyAdapter.mentioned?(event.payload, bot_name: "MenBot")
+    dispatch = {:ok, %{payload: %{text: "hello-back"}}}
+
+    assert {:xml, xml} = QiweiPassiveReplyAdapter.build(event, dispatch)
+    assert xml =~ "hello-back"
   end
 
-  test "未命中 @ 规则返回 success" do
+  test "非 @ 文本不回 XML，降级 success" do
     event = %{
       payload: %{
         msg_type: "text",
-        from_user: "user_3",
-        corp_id: "wwcorp",
+        from_user: "u3",
+        to_user: "corp3",
         content: "普通消息",
-        at_user_ids: []
+        at_list: []
       }
     }
 
-    assert :success =
-             QiweiPassiveReplyAdapter.build(
-               event,
-               {:ok, %{payload: %{text: "reply-ok"}}},
-               require_mention: true,
-               bot_user_id: "bot_user",
-               bot_name: "MenBot"
-             )
+    dispatch = {:ok, %{payload: %{text: "should-not-send"}}}
+
+    assert {:success} = QiweiPassiveReplyAdapter.build(event, dispatch)
   end
 
   test "非 text 不回 XML" do
-    event = %{
-      payload: %{
-        msg_type: "image",
-        from_user: "user_4",
-        corp_id: "wwcorp",
-        content: nil
-      }
-    }
+    event = %{payload: %{msg_type: "image", from_user: "u4", to_user: "corp4"}}
+    dispatch = {:ok, %{payload: %{text: "image-ack"}}}
 
-    assert :success =
-             QiweiPassiveReplyAdapter.build(event, {:ok, %{payload: %{text: "reply-ok"}}},
-               require_mention: false
-             )
+    assert {:success} = QiweiPassiveReplyAdapter.build(event, dispatch)
   end
 
-  test "回复内容长度裁剪" do
-    long_text = String.duplicate("a", 2_000)
-
+  test "内容长度裁剪：超长回复按 max_chars 截断" do
     event = %{
       payload: %{
         msg_type: "text",
-        from_user: "user_5",
-        corp_id: "wwcorp",
-        content: "@MenBot hi",
-        at_user_ids: []
+        from_user: "u5",
+        to_user: "corp5",
+        content: "@men-bot long",
+        at_list: []
       }
     }
 
-    assert {:xml, xml} =
-             QiweiPassiveReplyAdapter.build(
-               event,
-               {:ok, %{payload: %{text: long_text}}},
-               require_mention: true,
-               bot_name: "MenBot"
-             )
+    dispatch = {:ok, %{payload: %{text: "1234567890123456789012345"}}}
 
-    assert String.length(xml) < 1_400
+    assert {:xml, xml} = QiweiPassiveReplyAdapter.build(event, dispatch)
+    assert xml =~ "12345678901234567890"
+    refute xml =~ "123456789012345678901"
   end
 end

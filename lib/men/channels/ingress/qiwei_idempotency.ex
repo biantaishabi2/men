@@ -1,416 +1,287 @@
 defmodule Men.Channels.Ingress.QiweiIdempotency do
   @moduledoc """
-  企微 callback 幂等：同 key 短窗内重复请求返回首次响应。
+  企微回调幂等：短窗缓存首次响应，重复投递返回一致结果。
   """
 
   require Logger
 
-  alias Men.Channels.Ingress.QiweiAdapter
-
+  @table :men_qiwei_idempotency
   @default_ttl_seconds 120
-  @wait_interval_ms 20
-  @pending_wait_buffer_ms 500
-  @pending_state :pending
+  @default_pending_poll_interval_ms 20
+  @default_pending_wait_timeout_ms 5_000
 
-  @type response_payload :: %{type: :success} | %{type: :xml, body: binary()}
+  @type reply_result :: {:success} | {:xml, binary()}
+  @type entry_payload :: %{status: String.t(), response: map() | nil}
 
-  defmodule Backend do
-    @moduledoc false
-
-    @callback get(binary()) :: {:ok, term() | nil} | {:error, term()}
-    @callback put_if_absent(binary(), term(), pos_integer()) ::
-                :ok | {:error, :exists} | {:error, term()}
-    @callback put(binary(), term(), pos_integer()) :: :ok | {:error, term()}
-  end
-
-  defmodule Backend.ETS do
-    @moduledoc false
-    @behaviour Men.Channels.Ingress.QiweiIdempotency.Backend
-
-    @table :men_qiwei_idempotency
-    @owner_name :men_qiwei_idempotency_owner
-
-    @impl true
-    def get(key) do
-      ensure_table!()
-      cleanup_expired(System.system_time(:second))
-
-      case :ets.lookup(@table, key) do
-        [{^key, value, _expires_at}] -> {:ok, value}
-        _ -> {:ok, nil}
-      end
-    end
-
-    @impl true
-    def put_if_absent(key, value, ttl_seconds) when ttl_seconds > 0 do
-      ensure_table!()
-      now = System.system_time(:second)
-      cleanup_expired(now)
-
-      record = {key, value, now + ttl_seconds}
-
-      if :ets.insert_new(@table, record), do: :ok, else: {:error, :exists}
-    end
-
-    @impl true
-    def put(key, value, ttl_seconds) when ttl_seconds > 0 do
-      ensure_table!()
-      now = System.system_time(:second)
-      cleanup_expired(now)
-      :ets.insert(@table, {key, value, now + ttl_seconds})
-      :ok
-    end
-
-    defp ensure_table! do
-      case :ets.whereis(@table) do
-        :undefined ->
-          ensure_owner!()
-
-        _ ->
-          :ok
-      end
-    end
-
-    defp ensure_owner! do
-      case Process.whereis(@owner_name) do
-        nil ->
-          parent = self()
-          spawn(fn -> start_owner(parent) end)
-
-          receive do
-            :owner_ready -> :ok
-            :owner_exists -> :ok
-          after
-            100 -> ensure_owner!()
-          end
-
-        _pid ->
-          :ok
-      end
-    end
-
-    defp start_owner(parent) do
-      try do
-        Process.register(self(), @owner_name)
-        :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
-        send(parent, :owner_ready)
-        owner_loop()
-      rescue
-        # 已有其他进程抢先创建 owner。
-        ArgumentError -> send(parent, :owner_exists)
-      end
-    end
-
-    defp owner_loop do
-      receive do
-        :stop -> :ok
-        _ -> owner_loop()
-      end
-    end
-
-    defp cleanup_expired(now) do
-      :ets.select_delete(@table, [{{:"$1", :"$2", :"$3"}, [{:"=<", :"$3", now}], [true]}])
-      :ok
-    end
-  end
-
-  defmodule Backend.Redis do
-    @moduledoc false
-    @behaviour Men.Channels.Ingress.QiweiIdempotency.Backend
-
-    @default_timeout_ms 1_000
-
-    @impl true
-    def get(key) do
-      with {:ok, redix} <- ensure_redix(),
-           {:ok, conn, timeout_ms} <- start_conn(redix),
-           {:ok, result} <- command(redix, conn, ["GET", key], timeout_ms) do
-        case result do
-          nil -> {:ok, nil}
-          value when is_binary(value) -> decode_value(value)
-          _ -> {:error, :invalid_redis_response}
-        end
-      end
-    end
-
-    @impl true
-    def put_if_absent(key, value, ttl_seconds) when ttl_seconds > 0 do
-      with {:ok, redix} <- ensure_redix(),
-           {:ok, conn, timeout_ms} <- start_conn(redix),
-           encoded <- encode_value(value),
-           {:ok, result} <-
-             command(
-               redix,
-               conn,
-               ["SET", key, encoded, "EX", Integer.to_string(ttl_seconds), "NX"],
-               timeout_ms
-             ) do
-        case result do
-          "OK" -> :ok
-          nil -> {:error, :exists}
-          _ -> {:error, :invalid_redis_response}
-        end
-      end
-    end
-
-    @impl true
-    def put(key, value, ttl_seconds) when ttl_seconds > 0 do
-      with {:ok, redix} <- ensure_redix(),
-           {:ok, conn, timeout_ms} <- start_conn(redix),
-           encoded <- encode_value(value),
-           {:ok, "OK"} <-
-             command(
-               redix,
-               conn,
-               ["SET", key, encoded, "EX", Integer.to_string(ttl_seconds)],
-               timeout_ms
-             ) do
-        :ok
-      else
-        {:ok, _other} -> {:error, :invalid_redis_response}
-        {:error, reason} -> {:error, reason}
-      end
-    end
-
-    defp ensure_redix do
-      if Code.ensure_loaded?(Redix) do
-        {:ok, Redix}
-      else
-        {:error, :redix_unavailable}
-      end
-    end
-
-    defp start_conn(redix) do
-      config = Application.get_env(:men, __MODULE__, [])
-      timeout_ms = Keyword.get(config, :timeout_ms, @default_timeout_ms)
-
-      start_opts =
-        case Keyword.get(config, :url) do
-          url when is_binary(url) and url != "" ->
-            [url: url]
-
-          _ ->
-            [
-              host: Keyword.get(config, :host, "127.0.0.1"),
-              port: Keyword.get(config, :port, 6379),
-              password: Keyword.get(config, :password),
-              database: Keyword.get(config, :database, 0)
-            ]
-        end
-
-      case redix.start_link(start_opts) do
-        {:ok, conn} -> {:ok, conn, timeout_ms}
-        {:error, reason} -> {:error, reason}
-      end
-    end
-
-    defp command(redix, conn, args, timeout_ms) do
-      try do
-        redix.command(conn, args, timeout: timeout_ms)
-      after
-        Process.exit(conn, :normal)
-      end
-    end
-
-    defp encode_value(value), do: value |> :erlang.term_to_binary() |> Base.encode64()
-
-    defp decode_value(value) do
-      with {:ok, raw} <- Base.decode64(value),
-           decoded <- :erlang.binary_to_term(raw, [:safe]) do
-        {:ok, decoded}
-      else
-        _ -> {:error, :invalid_cached_payload}
-      end
-    end
-  end
-
-  @spec with_idempotency(map(), (-> response_payload()), keyword()) :: response_payload()
-  def with_idempotency(inbound_event, callback, opts \\ [])
-      when is_map(inbound_event) and is_function(callback, 0) do
+  @spec fetch_or_store(map(), (-> reply_result()), keyword()) ::
+          {:fresh, reply_result()} | {:duplicate, reply_result()}
+  def fetch_or_store(inbound_event, producer, opts \\ [])
+      when is_map(inbound_event) and is_function(producer, 0) do
     key = key(inbound_event)
-    ttl_seconds = Keyword.get(opts, :ttl_seconds, @default_ttl_seconds)
-    backend = Keyword.get(opts, :backend, Backend.ETS)
+    ttl = ttl_seconds(opts)
+    pending_wait_timeout_ms = pending_wait_timeout_ms(opts)
 
-    if is_binary(key) and key != "" do
-      case backend_get(backend, key) do
-        {:ok, %{} = cached_or_marker} ->
-          cond do
-            response_payload?(cached_or_marker) ->
-              cached_or_marker
+    case claim_or_read(key, ttl) do
+      {:owner, _entry} ->
+        response = run_producer(producer, key)
+        :ok = store_done(key, response, ttl)
+        {:fresh, response}
 
-            pending_marker?(cached_or_marker) ->
-              wait_for_response_or_run(backend, key, ttl_seconds, callback)
+      {:cached, payload} ->
+        {:duplicate, decode_response(payload)}
 
-            true ->
-              claim_and_evaluate(backend, key, ttl_seconds, callback)
-          end
+      {:pending, _entry} ->
+        case wait_for_done(key, pending_wait_timeout_ms) do
+          {:ok, payload} ->
+            {:duplicate, decode_response(payload)}
 
-        {:ok, _other} ->
-          claim_and_evaluate(backend, key, ttl_seconds, callback)
-
-        {:error, reason} ->
-          Logger.warning("qiwei.idempotency.backend_get_failed",
-            reason: inspect(reason),
-            key: key
-          )
-
-          callback.()
-      end
-    else
-      callback.()
-    end
-  end
-
-  @spec key(map()) :: binary() | nil
-  def key(inbound_event) when is_map(inbound_event) do
-    fp = QiweiAdapter.idempotency_fingerprint(inbound_event)
-
-    cond do
-      present?(fp[:corp_id]) and present?(fp[:agent_id]) and present?(fp[:msg_id]) ->
-        join_key(["qiwei", fp[:corp_id], fp[:agent_id], fp[:msg_id]])
-
-      present?(fp[:corp_id]) and present?(fp[:agent_id]) and present?(fp[:from_user]) and
-        present?(fp[:create_time]) and present?(fp[:event]) ->
-        join_key([
-          "qiwei",
-          fp[:corp_id],
-          fp[:agent_id],
-          fp[:from_user],
-          fp[:create_time],
-          fp[:event],
-          fp[:event_key] || ""
-        ])
-
-      true ->
-        nil
-    end
-  end
-
-  def key(_), do: nil
-
-  defp claim_and_evaluate(backend, key, ttl_seconds, callback) do
-    case backend_put_if_absent(backend, key, pending_marker(), ttl_seconds) do
-      :ok ->
-        response = callback.()
-
-        case backend_put(backend, key, response, ttl_seconds) do
-          :ok ->
-            response
-
-          {:error, reason} ->
-            Logger.warning("qiwei.idempotency.backend_put_failed",
-              reason: inspect(reason),
-              key: key
+          :timeout ->
+            Logger.warning("qiwei.idempotency.pending_wait_timeout",
+              key: key,
+              timeout_ms: pending_wait_timeout_ms
             )
 
-            response
+            {:duplicate, {:success}}
+
+          :miss ->
+            Logger.warning("qiwei.idempotency.pending_missing", key: key)
+            {:duplicate, {:success}}
         end
-
-      {:error, :exists} ->
-        wait_for_response_or_run(backend, key, ttl_seconds, callback)
-
-      {:error, reason} ->
-        Logger.warning("qiwei.idempotency.backend_put_if_absent_failed",
-          reason: inspect(reason),
-          key: key
-        )
-
-        callback.()
     end
   end
 
-  defp wait_for_response_or_run(backend, key, ttl_seconds, callback) do
-    wait_for_response_or_run(
-      backend,
-      key,
-      ttl_seconds,
-      callback,
-      pending_wait_deadline_ms(ttl_seconds)
+  @spec key(map()) :: binary()
+  def key(inbound_event) when is_map(inbound_event) do
+    payload = Map.get(inbound_event, :payload, %{})
+
+    corp_id = map_value(payload, :corp_id, "unknown_corp")
+    agent_id = map_value(payload, :agent_id, "unknown_agent")
+    msg_type = map_value(payload, :msg_type, "unknown")
+
+    if msg_type == "event" do
+      from_user = map_value(payload, :from_user, "unknown_user")
+      create_time = map_value(payload, :create_time, 0) |> to_string()
+      event = map_value(payload, :event, "unknown_event")
+      event_key = map_value(payload, :event_key, "")
+
+      ["qiwei", corp_id, agent_id, from_user, create_time, event, event_key]
+      |> Enum.join(":")
+    else
+      msg_id =
+        map_value(payload, :msg_id, nil) ||
+          Map.get(inbound_event, :request_id, "unknown_msg")
+
+      ["qiwei", corp_id, agent_id, to_string(msg_id)]
+      |> Enum.join(":")
+    end
+  end
+
+  defp pending_entry, do: %{status: "pending", response: nil}
+
+  defp done_entry(response), do: %{status: "done", response: encode_response(response)}
+
+  defp encode_response({:success}), do: %{type: "success", body: ""}
+
+  defp encode_response({:xml, body}) when is_binary(body) do
+    digest = :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
+    %{type: "xml", body: body, digest: digest}
+  end
+
+  defp encode_response(_), do: %{type: "success", body: ""}
+
+  defp decode_response(%{"type" => "xml", "body" => body}) when is_binary(body), do: {:xml, body}
+  defp decode_response(%{type: "xml", body: body}) when is_binary(body), do: {:xml, body}
+  defp decode_response(_), do: {:success}
+
+  defp claim_or_read(key, ttl_seconds) do
+    now = now_ms()
+    expires_at = now + ttl_seconds * 1000
+    ensure_table!()
+
+    case :ets.insert_new(@table, {key, expires_at, pending_entry()}) do
+      true ->
+        {:owner, pending_entry()}
+
+      false ->
+        read_existing_or_retry(key, ttl_seconds, now)
+    end
+  rescue
+    error ->
+      Logger.warning("qiwei.idempotency.claim_failed", key: key, reason: inspect(error))
+      {:owner, pending_entry()}
+  end
+
+  defp read_existing_or_retry(key, ttl_seconds, now) do
+    case :ets.lookup(@table, key) do
+      [{^key, expires_at, payload}] when is_integer(expires_at) and expires_at > now ->
+        case payload_status(payload) do
+          :done -> {:cached, payload_response(payload)}
+          :pending -> {:pending, payload}
+        end
+
+      [{^key, _expires_at, _payload}] ->
+        :ets.delete(@table, key)
+
+        case :ets.insert_new(@table, {key, now_ms() + ttl_seconds * 1000, pending_entry()}) do
+          true -> {:owner, pending_entry()}
+          false -> {:pending, pending_entry()}
+        end
+
+      _ ->
+        case :ets.insert_new(@table, {key, now_ms() + ttl_seconds * 1000, pending_entry()}) do
+          true -> {:owner, pending_entry()}
+          false -> {:pending, pending_entry()}
+        end
+    end
+  rescue
+    error ->
+      Logger.warning("qiwei.idempotency.lookup_failed", key: key, reason: inspect(error))
+      {:owner, pending_entry()}
+  end
+
+  defp wait_for_done(key, wait_timeout_ms) do
+    deadline = now_ms() + wait_timeout_ms
+    do_wait_for_done(key, deadline)
+  end
+
+  defp do_wait_for_done(key, deadline) do
+    now = now_ms()
+
+    case lookup_entry(key, now) do
+      {:done, payload} ->
+        {:ok, payload_response(payload)}
+
+      :pending when now < deadline ->
+        Process.sleep(@default_pending_poll_interval_ms)
+        do_wait_for_done(key, deadline)
+
+      :pending ->
+        :timeout
+
+      :miss ->
+        :miss
+    end
+  end
+
+  defp lookup_entry(key, now) do
+    ensure_table!()
+
+    case :ets.lookup(@table, key) do
+      [{^key, expires_at, payload}] when is_integer(expires_at) and expires_at > now ->
+        case payload_status(payload) do
+          :done -> {:done, payload}
+          :pending -> :pending
+        end
+
+      [{^key, _expires_at, _payload}] ->
+        :ets.delete(@table, key)
+        :miss
+
+      _ ->
+        :miss
+    end
+  rescue
+    error ->
+      Logger.warning("qiwei.idempotency.lookup_entry_failed", key: key, reason: inspect(error))
+      :miss
+  end
+
+  defp run_producer(producer, key) do
+    producer.()
+  rescue
+    error ->
+      Logger.warning("qiwei.idempotency.producer_failed", key: key, reason: inspect(error))
+      {:success}
+  catch
+    kind, reason ->
+      Logger.warning("qiwei.idempotency.producer_failed",
+        key: key,
+        reason: inspect({kind, reason})
+      )
+
+      {:success}
+  end
+
+  defp store_done(key, response, ttl_seconds) do
+    now = now_ms()
+    ensure_table!()
+    expires_at = now + ttl_seconds * 1000
+    true = :ets.insert(@table, {key, expires_at, done_entry(response)})
+    cleanup_expired(now)
+    :ok
+  rescue
+    error ->
+      {:error, error}
+  end
+
+  defp ttl_seconds(opts) do
+    Keyword.get(
+      opts,
+      :ttl_seconds,
+      qiwei_config() |> Keyword.get(:idempotency_ttl_seconds, @default_ttl_seconds)
     )
   end
 
-  defp wait_for_response_or_run(backend, key, ttl_seconds, callback, deadline_ms) do
-    case backend_get(backend, key) do
-      {:ok, %{} = cached_or_marker} ->
-        cond do
-          response_payload?(cached_or_marker) ->
-            cached_or_marker
+  defp pending_wait_timeout_ms(opts) do
+    Keyword.get(
+      opts,
+      :pending_wait_timeout_ms,
+      qiwei_config()
+      |> Keyword.get(
+        :idempotency_pending_wait_timeout_ms,
+        qiwei_config() |> Keyword.get(:callback_timeout_ms, @default_pending_wait_timeout_ms)
+      )
+    )
+  end
 
-          pending_marker?(cached_or_marker) ->
-            if wait_deadline_exceeded?(deadline_ms) do
-              claim_and_evaluate(backend, key, ttl_seconds, callback)
-            else
-              Process.sleep(@wait_interval_ms)
-              wait_for_response_or_run(backend, key, ttl_seconds, callback, deadline_ms)
-            end
+  defp ensure_table! do
+    case :ets.whereis(@table) do
+      :undefined ->
+        # 使用稳定 heir，避免短生命周期请求进程退出后 ETS 表被销毁。
+        heir = Process.whereis(:init)
 
-          true ->
-            claim_and_evaluate(backend, key, ttl_seconds, callback)
-        end
+        :ets.new(@table, [
+          :named_table,
+          :public,
+          :set,
+          {:heir, heir, :ok},
+          read_concurrency: true,
+          write_concurrency: true
+        ])
 
-      {:ok, _other} ->
-        claim_and_evaluate(backend, key, ttl_seconds, callback)
+        :ok
 
-      {:error, reason} ->
-        Logger.warning("qiwei.idempotency.backend_wait_failed", reason: inspect(reason), key: key)
-        callback.()
+      _ ->
+        :ok
     end
+  rescue
+    ArgumentError ->
+      :ok
   end
 
-  defp pending_wait_deadline_ms(ttl_seconds) when is_integer(ttl_seconds) and ttl_seconds > 0 do
-    System.monotonic_time(:millisecond) + ttl_seconds * 1_000 + @pending_wait_buffer_ms
+  # 每次写入做一次轻量清理，避免表无限增长。
+  defp cleanup_expired(now) do
+    :ets.select_delete(@table, [{{:"$1", :"$2", :"$3"}, [{:"=<", :"$2", now}], [true]}])
+    :ok
   end
 
-  defp wait_deadline_exceeded?(deadline_ms) do
-    System.monotonic_time(:millisecond) >= deadline_ms
+  defp now_ms, do: System.monotonic_time(:millisecond)
+
+  defp payload_status(%{"status" => "done"}), do: :done
+  defp payload_status(%{status: "done"}), do: :done
+  defp payload_status(_), do: :pending
+
+  defp payload_response(%{"response" => response}), do: response
+  defp payload_response(%{response: response}), do: response
+  defp payload_response(_), do: %{type: "success", body: ""}
+
+  defp qiwei_config do
+    Application.get_env(:men, :qiwei, [])
   end
 
-  defp backend_get(backend, key) do
-    _ = Code.ensure_loaded(backend)
-
-    if function_exported?(backend, :get, 1),
-      do: backend.get(key),
-      else: {:error, :invalid_backend}
+  defp map_value(map, key, default) when is_map(map) do
+    Map.get(map, key, Map.get(map, Atom.to_string(key), default))
   end
 
-  defp backend_put_if_absent(backend, key, value, ttl_seconds) do
-    _ = Code.ensure_loaded(backend)
-
-    if function_exported?(backend, :put_if_absent, 3) do
-      backend.put_if_absent(key, value, ttl_seconds)
-    else
-      {:error, :invalid_backend}
-    end
-  end
-
-  defp backend_put(backend, key, value, ttl_seconds) do
-    _ = Code.ensure_loaded(backend)
-
-    if function_exported?(backend, :put, 3) do
-      backend.put(key, value, ttl_seconds)
-    else
-      {:error, :invalid_backend}
-    end
-  end
-
-  defp join_key(parts) do
-    parts
-    |> Enum.map(&to_string/1)
-    |> Enum.join(":")
-  end
-
-  defp present?(value) when is_binary(value), do: String.trim(value) != ""
-  defp present?(value) when is_integer(value), do: true
-  defp present?(_), do: false
-
-  defp response_payload?(%{type: :success}), do: true
-  defp response_payload?(%{type: :xml, body: body}) when is_binary(body), do: true
-  defp response_payload?(_), do: false
-
-  defp pending_marker do
-    %{__state__: @pending_state, ts: System.system_time(:millisecond)}
-  end
-
-  defp pending_marker?(%{__state__: @pending_state}), do: true
-  defp pending_marker?(_), do: false
+  defp map_value(_map, _key, default), do: default
 end

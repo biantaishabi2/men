@@ -3,30 +3,29 @@ defmodule Men.Integration.QiweiCallbackFlowTest do
 
   alias Men.Gateway.DispatchServer
 
+  @corp_id "ww-integration"
+  @token "qiwei-integration-token"
+
   defmodule MockZcpgClient do
     def start_turn(prompt, context) do
       notify({:zcpg_called, prompt, context})
 
       case Jason.decode(prompt) do
-        {:ok, %{"content" => "@MenBot timeout"}} ->
-          {:error,
-           %{
-             type: :timeout,
-             code: "timeout",
-             message: "zcpg timeout",
-             details: %{source: :qiwei_integration},
-             fallback: true
-           }}
+        {:ok, %{"content" => content}} when is_binary(content) ->
+          cond do
+            String.contains?(content, "error_no_fallback") ->
+              {:error,
+               %{
+                 type: :failed,
+                 code: "runtime_error",
+                 message: "upstream failed",
+                 details: %{status: 500},
+                 fallback: false
+               }}
 
-        {:ok, %{"content" => "@MenBot hard_fail"}} ->
-          {:error,
-           %{
-             type: :failed,
-             code: "hard_fail",
-             message: "zcpg hard fail",
-             details: %{source: :qiwei_integration},
-             fallback: false
-           }}
+            true ->
+              {:ok, %{text: "zcpg-final", meta: %{source: :zcpg_mock}}}
+          end
 
         _ ->
           {:ok, %{text: "zcpg-final", meta: %{source: :zcpg_mock}}}
@@ -46,20 +45,7 @@ defmodule Men.Integration.QiweiCallbackFlowTest do
     @impl true
     def start_turn(prompt, context) do
       notify({:legacy_called, prompt, context})
-
-      case Jason.decode(prompt) do
-        {:ok, %{"content" => "@MenBot hard_fail"}} ->
-          {:error,
-           %{
-             type: :failed,
-             code: "legacy_fail",
-             message: "legacy failed",
-             details: %{source: :legacy_mock}
-           }}
-
-        _ ->
-          {:ok, %{text: "legacy-final", meta: %{source: :legacy_mock}}}
-      end
+      {:ok, %{text: "legacy-final", meta: %{source: :legacy_mock}}}
     end
 
     defp notify(message) do
@@ -69,8 +55,9 @@ defmodule Men.Integration.QiweiCallbackFlowTest do
     end
   end
 
-  defmodule NoopEgress do
+  defmodule MockEgress do
     @behaviour Men.Channels.Egress.Adapter
+
     @impl true
     def send(_target, _message), do: :ok
   end
@@ -78,11 +65,25 @@ defmodule Men.Integration.QiweiCallbackFlowTest do
   setup do
     Application.put_env(:men, :qiwei_integration_test_pid, self())
 
+    original_qiwei = Application.get_env(:men, :qiwei, [])
+    original_controller = Application.get_env(:men, MenWeb.Webhooks.QiweiController, [])
     original_cutover = Application.get_env(:men, :zcpg_cutover, [])
+
+    Application.put_env(:men, :qiwei,
+      callback_enabled: true,
+      token: @token,
+      encoding_aes_key: encoding_aes_key(),
+      corp_id: @corp_id,
+      bot_user_id: "bot_user_1",
+      bot_name: "men-bot",
+      reply_require_mention: true,
+      idempotency_ttl_seconds: 120,
+      callback_timeout_ms: 2_000
+    )
 
     Application.put_env(:men, :zcpg_cutover,
       enabled: true,
-      tenant_whitelist: ["wwcorp_test"],
+      tenant_whitelist: [@corp_id],
       env_override: false,
       timeout_ms: 2_000,
       breaker: [failure_threshold: 5, window_seconds: 30, cooldown_seconds: 60]
@@ -95,70 +96,83 @@ defmodule Men.Integration.QiweiCallbackFlowTest do
        name: server_name,
        legacy_bridge_adapter: MockLegacyBridge,
        zcpg_client: MockZcpgClient,
-       egress_adapter: NoopEgress,
+       egress_adapter: MockEgress,
        session_coordinator_enabled: false}
     )
 
-    Application.put_env(:men, MenWeb.Webhooks.QiweiController,
-      callback_enabled: true,
-      token: "qiwei-token",
-      encoding_aes_key: "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
-      receive_id: "wwcorp_test",
-      bot_name: "MenBot",
-      bot_user_id: "bot_user_id",
-      reply_require_mention: true,
-      callback_timeout_ms: 1_234,
-      dispatch_server: server_name,
-      idempotency_ttl_seconds: 120
-    )
+    Application.put_env(:men, MenWeb.Webhooks.QiweiController, dispatch_server: server_name)
 
     on_exit(fn ->
       Application.delete_env(:men, :qiwei_integration_test_pid)
-      Application.delete_env(:men, MenWeb.Webhooks.QiweiController)
+      Application.put_env(:men, :qiwei, original_qiwei)
+      Application.put_env(:men, MenWeb.Webhooks.QiweiController, original_controller)
       Application.put_env(:men, :zcpg_cutover, original_cutover)
     end)
 
-    :ok
+    {:ok, server: server_name}
   end
 
-  test "callback->dispatch->zcpg->reply XML", %{conn: conn} do
-    conn =
-      post_signed_callback(
-        conn,
-        inbound_message_xml(msg_id: "flow-1", content: "@MenBot 你好"),
-        "nonce-flow-1"
+  test "callback->dispatch->zcpg->reply：@ 且白名单命中返回 XML", %{conn: conn} do
+    xml =
+      text_xml(
+        msg_id: "msg-flow-1",
+        from_user: "user-flow-1",
+        content: "@men-bot hello",
+        at_user: "bot_user_1"
       )
 
-    assert response(conn, 200) =~ "<![CDATA[zcpg-final]]>"
-    assert_receive {:zcpg_called, _, zcpg_context}
-    assert zcpg_context.timeout_ms == 1_234
+    conn = post_callback(conn, xml)
+    body = response(conn, 200)
+
+    assert body =~ "<xml>"
+    assert body =~ "zcpg-final"
+    assert_receive {:zcpg_called, _, _}
     refute_receive {:legacy_called, _, _}
   end
 
-  test "下游失败降级 success", %{conn: conn} do
-    conn =
-      post_signed_callback(
-        conn,
-        inbound_message_xml(msg_id: "flow-2", content: "@MenBot hard_fail"),
-        "nonce-flow-2"
+  test "下游失败降级：fallback=false 时回 success，不返回 500", %{conn: conn} do
+    xml =
+      text_xml(
+        msg_id: "msg-flow-2",
+        from_user: "user-flow-2",
+        content: "@men-bot error_no_fallback",
+        at_user: "bot_user_1"
       )
+
+    conn = post_callback(conn, xml)
 
     assert response(conn, 200) == "success"
     assert_receive {:zcpg_called, _, _}
+  end
+
+  test "非@文本：200 success，不回 XML", %{conn: conn} do
+    xml =
+      text_xml(
+        msg_id: "msg-flow-3",
+        from_user: "user-flow-3",
+        content: "普通消息",
+        at_user: nil
+      )
+
+    conn = post_callback(conn, xml)
+
+    assert response(conn, 200) == "success"
+    refute_receive {:zcpg_called, _, _}
     refute_receive {:legacy_called, _, _}
   end
 
-  test "灰度切流与回滚即时生效", %{conn: conn} do
-    conn_1 =
-      post_signed_callback(
-        conn,
-        inbound_message_xml(msg_id: "flow-3", content: "@MenBot timeout"),
-        "nonce-flow-3"
+  test "灰度切流与回滚：关闭开关后分钟级恢复 legacy 路径", %{conn: conn} do
+    xml1 =
+      text_xml(
+        msg_id: "msg-flow-4",
+        from_user: "user-flow-4",
+        content: "@men-bot before rollback",
+        at_user: "bot_user_1"
       )
 
-    assert response(conn_1, 200) == "success"
+    conn1 = post_callback(conn, xml1)
+    assert response(conn1, 200) =~ "zcpg-final"
     assert_receive {:zcpg_called, _, _}
-    refute_receive {:legacy_called, _, _}
 
     Application.put_env(:men, :zcpg_cutover,
       enabled: false,
@@ -168,85 +182,98 @@ defmodule Men.Integration.QiweiCallbackFlowTest do
       breaker: [failure_threshold: 5, window_seconds: 30, cooldown_seconds: 60]
     )
 
-    conn_2 =
-      post_signed_callback(
-        Phoenix.ConnTest.build_conn(),
-        inbound_message_xml(msg_id: "flow-4", content: "@MenBot rollback"),
-        "nonce-flow-4"
+    xml2 =
+      text_xml(
+        msg_id: "msg-flow-5",
+        from_user: "user-flow-4",
+        content: "@men-bot after rollback",
+        at_user: "bot_user_1"
       )
 
-    assert response(conn_2, 200) =~ "<![CDATA[legacy-final]]>"
+    conn2 = post_callback(build_conn(), xml2)
+    assert response(conn2, 200) =~ "<xml>"
     refute_receive {:zcpg_called, _, _}
     assert_receive {:legacy_called, _, _}
   end
 
-  defp post_signed_callback(conn, message_xml, nonce) do
-    encrypt = encrypt_payload(message_xml)
-    timestamp = Integer.to_string(System.system_time(:second))
-    signature = sign("qiwei-token", timestamp, nonce, encrypt)
-
-    conn
-    |> put_req_header("content-type", "text/xml")
-    |> post(
-      "/webhooks/qiwei?timestamp=#{timestamp}&nonce=#{nonce}&msg_signature=#{signature}",
-      callback_outer_xml(encrypt)
-    )
-  end
-
-  defp callback_outer_xml(encrypt) do
-    """
-    <xml>
-      <ToUserName><![CDATA[wwcorp_test]]></ToUserName>
-      <Encrypt><![CDATA[#{encrypt}]]></Encrypt>
-    </xml>
-    """
-    |> String.trim()
-  end
-
-  defp inbound_message_xml(opts) do
+  defp text_xml(opts) do
     msg_id = Keyword.fetch!(opts, :msg_id)
+    from_user = Keyword.fetch!(opts, :from_user)
     content = Keyword.fetch!(opts, :content)
+    at_user = Keyword.get(opts, :at_user)
+
+    at_xml = if is_binary(at_user), do: "<AtUser><![CDATA[#{at_user}]]></AtUser>", else: ""
 
     """
     <xml>
-      <ToUserName><![CDATA[wwcorp_test]]></ToUserName>
-      <FromUserName><![CDATA[user_flow]]></FromUserName>
-      <CreateTime>1700001111</CreateTime>
+      <ToUserName><![CDATA[#{@corp_id}]]></ToUserName>
+      <FromUserName><![CDATA[#{from_user}]]></FromUserName>
+      <CreateTime>1700000100</CreateTime>
       <MsgType><![CDATA[text]]></MsgType>
       <Content><![CDATA[#{content}]]></Content>
       <MsgId>#{msg_id}</MsgId>
-      <AgentID>1000002</AgentID>
+      <AgentID>100001</AgentID>
+      #{at_xml}
     </xml>
     """
-    |> String.trim()
   end
 
-  defp encrypt_payload(plain_text) do
-    key = aes_key()
-    iv = binary_part(key, 0, 16)
-    random = :crypto.strong_rand_bytes(16)
-    msg_len = byte_size(plain_text)
-    packed = random <> <<msg_len::32-big-unsigned-integer>> <> plain_text <> "wwcorp_test"
-    cipher = :crypto.crypto_one_time(:aes_256_cbc, key, iv, pkcs7_pad(packed), true)
-    Base.encode64(cipher)
+  defp post_callback(conn, plain_xml) do
+    encrypt = encrypt_payload(plain_xml)
+    query = signed_query(encrypt)
+
+    conn
+    |> put_req_header("content-type", "application/xml")
+    |> post("/webhooks/qiwei?" <> URI.encode_query(query), wrap_encrypt(encrypt))
   end
 
-  defp aes_key do
-    {:ok, key} = Base.decode64("abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG=")
-    key
+  defp wrap_encrypt(encrypt) do
+    "<xml><ToUserName><![CDATA[#{@corp_id}]]></ToUserName><Encrypt><![CDATA[#{encrypt}]]></Encrypt></xml>"
   end
 
-  defp pkcs7_pad(content) do
-    block_size = 32
-    padding = block_size - rem(byte_size(content), block_size)
-    content <> :binary.copy(<<padding>>, padding)
+  defp signed_query(encrypt) do
+    timestamp = "1700000000"
+    nonce = "nonce-1"
+
+    %{
+      "msg_signature" => signature(@token, timestamp, nonce, encrypt),
+      "timestamp" => timestamp,
+      "nonce" => nonce,
+      "echostr" => encrypt
+    }
   end
 
-  defp sign(token, timestamp, nonce, encrypted) do
-    [token, timestamp, nonce, encrypted]
+  defp signature(token, timestamp, nonce, encrypt) do
+    [token, timestamp, nonce, encrypt]
     |> Enum.sort()
-    |> Enum.join()
+    |> Enum.join("")
     |> then(&:crypto.hash(:sha, &1))
     |> Base.encode16(case: :lower)
+  end
+
+  defp encrypt_payload(plain) do
+    aes_key = decode_aes_key()
+    random = :binary.copy(<<1>>, 16)
+    payload = random <> <<byte_size(plain)::unsigned-integer-size(32)>> <> plain <> @corp_id
+    padded = pkcs7_pad(payload)
+
+    :crypto.crypto_one_time(:aes_256_cbc, aes_key, binary_part(aes_key, 0, 16), padded, true)
+    |> Base.encode64()
+  end
+
+  defp pkcs7_pad(data) do
+    block_size = 32
+    pad = block_size - rem(byte_size(data), block_size)
+    data <> :binary.copy(<<pad>>, pad)
+  end
+
+  defp decode_aes_key do
+    Base.decode64!(encoding_aes_key() <> "=")
+  end
+
+  defp encoding_aes_key do
+    :crypto.hash(:sha256, "qiwei-integration-test-key")
+    |> binary_part(0, 32)
+    |> Base.encode64(padding: false)
   end
 end

@@ -28,19 +28,6 @@ parse_positive_integer_env = fn env_name, default ->
   end
 end
 
-parse_non_negative_integer_env = fn env_name, default ->
-  case System.get_env(env_name) do
-    nil ->
-      default
-
-    value ->
-      case Integer.parse(value) do
-        {parsed, ""} when parsed >= 0 -> parsed
-        _ -> default
-      end
-  end
-end
-
 parse_boolean_env = fn env_name, default ->
   case System.get_env(env_name) do
     nil ->
@@ -91,20 +78,6 @@ parse_invalidation_codes_env = fn env_name, default ->
   end
 end
 
-parse_module_env = fn env_name, default ->
-  case System.get_env(env_name) do
-    nil ->
-      default
-
-    value ->
-      case String.downcase(String.trim(value)) do
-        "ets" -> Men.Channels.Ingress.QiweiIdempotency.Backend.ETS
-        "redis" -> Men.Channels.Ingress.QiweiIdempotency.Backend.Redis
-        _ -> default
-      end
-  end
-end
-
 config :men, :runtime_bridge,
   # 支持仅通过配置切换 bridge 实现，不做运行时动态开关。
   bridge_impl: runtime_bridge_impl,
@@ -125,79 +98,23 @@ config :men, Men.Gateway.SessionCoordinator,
       [:runtime_session_not_found]
     )
 
-default_gateway_policy =
-  case System.get_env("GATEWAY_BOOTSTRAP_POLICY_JSON") do
-    nil ->
-      %{
-        "acl" => %{
-          "main" => %{
-            "read" => ["global.", "agent.", "shared.", "inbox."],
-            "write" => ["global.control.", "inbox."]
-          },
-          "child" => %{
-            "read" => ["agent.$agent_id.", "shared.evidence.agent.$agent_id.", "inbox."],
-            "write" => ["agent.$agent_id.", "shared.evidence.agent.$agent_id.", "inbox."]
-          },
-          "tool" => %{
-            "read" => ["agent.$agent_id.", "shared.evidence.agent.$agent_id.", "inbox."],
-            "write" => ["inbox."]
-          },
-          "system" => %{"read" => [""], "write" => [""]}
-        },
-        "wake" => %{
-          "must_wake" => ["agent_result", "agent_error", "policy_changed"],
-          "inbox_only" => ["heartbeat", "tool_progress", "telemetry"]
-        },
-        "dedup_ttl_ms" => 60_000,
-        "version" => 0,
-        "policy_version" => "fallback"
-      }
+config :men, Men.Gateway.DispatchServer, bridge_adapter: runtime_bridge_impl
 
-    raw ->
-      case Jason.decode(raw) do
-        {:ok, value} when is_map(value) -> value
-        _ -> %{}
-      end
-  end
+qiwei_cutover_enabled =
+  parse_boolean_env.(
+    "QIWEI_CUTOVER_ENABLED",
+    parse_boolean_env.("ZCPG_CUTOVER_ENABLED", false)
+  )
 
-config :men, :ops_policy,
-  cache_ttl_ms: parse_positive_integer_env.("OPS_POLICY_CACHE_TTL_MS", 60_000),
-  reconcile_interval_ms: parse_positive_integer_env.("OPS_POLICY_RECONCILE_INTERVAL_MS", 30_000),
-  reconcile_jitter_ms: parse_non_negative_integer_env.("OPS_POLICY_RECONCILE_JITTER_MS", 5_000),
-  reconcile_failure_threshold:
-    parse_positive_integer_env.("OPS_POLICY_RECONCILE_FAILURE_THRESHOLD", 3),
-  telemetry_enabled: parse_boolean_env.("OPS_POLICY_TELEMETRY_ENABLED", true),
-  default_policies: %{
-    {"default", "prod", "gateway", "gateway_runtime"} => default_gateway_policy
-  }
-
-config :men, Men.Gateway.OpsPolicyProvider,
-  cache_ttl_ms: parse_positive_integer_env.("GATEWAY_POLICY_CACHE_TTL_MS", 300_000),
-  bootstrap_policy: default_gateway_policy
-
-config :men, Men.Gateway.DispatchServer,
-  agent_loop_enabled: parse_boolean_env.("GATEWAY_AGENT_LOOP_ENABLED", true),
-  prompt_frame_injection_enabled:
-    parse_boolean_env.("GATEWAY_PROMPT_FRAME_INJECTION_ENABLED", false),
-  frame_budget_tokens: parse_positive_integer_env.("GATEWAY_FRAME_BUDGET_TOKENS", 16_000),
-  frame_budget_messages: parse_positive_integer_env.("GATEWAY_FRAME_BUDGET_MESSAGES", 20),
-  receipt_recent_limit: parse_positive_integer_env.("GATEWAY_RECEIPT_RECENT_LIMIT", 20),
-  event_bus_topic: System.get_env("GATEWAY_EVENT_BUS_TOPIC") || "gateway_events"
-
-# 钉钉机器人回发配置（生产可直接由环境变量驱动）。
-dingtalk_webhook_url = System.get_env("DINGTALK_ROBOT_WEBHOOK_URL")
+qiwei_cutover_whitelist =
+  parse_string_list_env.(
+    "QIWEI_CUTOVER_TENANT_WHITELIST",
+    parse_string_list_env.("ZCPG_CUTOVER_TENANT_WHITELIST", [])
+  )
 
 config :men, :zcpg_cutover,
-  enabled:
-    parse_boolean_env.(
-      "QIWEI_CUTOVER_ENABLED",
-      parse_boolean_env.("ZCPG_CUTOVER_ENABLED", false)
-    ),
-  tenant_whitelist:
-    parse_string_list_env.(
-      "QIWEI_CUTOVER_TENANT_WHITELIST",
-      parse_string_list_env.("ZCPG_CUTOVER_TENANT_WHITELIST", [])
-    ),
+  enabled: qiwei_cutover_enabled,
+  tenant_whitelist: qiwei_cutover_whitelist,
   env_override: parse_boolean_env.("ZCPG_CUTOVER_ENV_OVERRIDE", false),
   timeout_ms: parse_positive_integer_env.("ZCPG_CUTOVER_TIMEOUT_MS", 8_000),
   breaker: [
@@ -206,29 +123,19 @@ config :men, :zcpg_cutover,
     cooldown_seconds: parse_positive_integer_env.("ZCPG_CUTOVER_BREAKER_COOLDOWN_SECONDS", 60)
   ]
 
-config :men, MenWeb.Webhooks.QiweiController,
+config :men, :qiwei,
   callback_enabled: parse_boolean_env.("QIWEI_CALLBACK_ENABLED", false),
   token: System.get_env("QIWEI_CALLBACK_TOKEN"),
   encoding_aes_key: System.get_env("QIWEI_CALLBACK_ENCODING_AES_KEY"),
-  receive_id: System.get_env("QIWEI_RECEIVE_ID"),
-  bot_name: System.get_env("QIWEI_BOT_NAME"),
+  corp_id: System.get_env("QIWEI_CORP_ID"),
   bot_user_id: System.get_env("QIWEI_BOT_USER_ID"),
+  bot_name: System.get_env("QIWEI_BOT_NAME"),
   reply_require_mention: parse_boolean_env.("QIWEI_REPLY_REQUIRE_MENTION", true),
-  callback_timeout_ms: parse_positive_integer_env.("QIWEI_CALLBACK_TIMEOUT_MS", 8_000),
+  reply_max_chars: parse_positive_integer_env.("QIWEI_REPLY_MAX_CHARS", 600),
+  callback_timeout_ms: parse_positive_integer_env.("QIWEI_CALLBACK_TIMEOUT_MS", 4_000),
   idempotency_ttl_seconds: parse_positive_integer_env.("QIWEI_IDEMPOTENCY_TTL_SECONDS", 120),
-  idempotency_backend:
-    parse_module_env.(
-      "QIWEI_IDEMPOTENCY_BACKEND",
-      Men.Channels.Ingress.QiweiIdempotency.Backend.Redis
-    )
-
-config :men, Men.Channels.Ingress.QiweiIdempotency.Backend.Redis,
-  url: System.get_env("QIWEI_IDEMPOTENCY_REDIS_URL") || System.get_env("REDIS_URL"),
-  host: System.get_env("QIWEI_IDEMPOTENCY_REDIS_HOST") || "127.0.0.1",
-  port: parse_positive_integer_env.("QIWEI_IDEMPOTENCY_REDIS_PORT", 6379),
-  password: System.get_env("QIWEI_IDEMPOTENCY_REDIS_PASSWORD"),
-  database: parse_non_negative_integer_env.("QIWEI_IDEMPOTENCY_REDIS_DB", 0),
-  timeout_ms: parse_positive_integer_env.("QIWEI_IDEMPOTENCY_REDIS_TIMEOUT_MS", 1_000)
+  cutover_enabled: qiwei_cutover_enabled,
+  cutover_tenant_whitelist: qiwei_cutover_whitelist
 
 gong_rpc_node_start_type =
   case System.get_env("GONG_RPC_NODE_START_TYPE") do

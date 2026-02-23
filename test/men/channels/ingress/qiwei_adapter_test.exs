@@ -1,109 +1,105 @@
 defmodule Men.Channels.Ingress.QiweiAdapterTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Men.Channels.Ingress.QiweiAdapter
 
-  test "text 消息标准化" do
+  setup do
+    original = Application.get_env(:men, :qiwei, [])
+
+    Application.put_env(:men, :qiwei,
+      bot_user_id: "bot_user_1",
+      bot_name: "men-bot",
+      reply_require_mention: true
+    )
+
+    on_exit(fn ->
+      Application.put_env(:men, :qiwei, original)
+    end)
+
+    :ok
+  end
+
+  test "text 消息标准化：tenant/msg_id/at_list 字段完整" do
     xml = """
     <xml>
-      <ToUserName><![CDATA[wwcorp]]></ToUserName>
-      <FromUserName><![CDATA[user_a]]></FromUserName>
-      <CreateTime>1700000001</CreateTime>
+      <ToUserName><![CDATA[corp-1]]></ToUserName>
+      <FromUserName><![CDATA[user-1]]></FromUserName>
+      <CreateTime>1700000000</CreateTime>
       <MsgType><![CDATA[text]]></MsgType>
-      <Content><![CDATA[@助手 你好]]></Content>
-      <MsgId>123456</MsgId>
-      <AgentID>1000002</AgentID>
-      <MentionedUserNameList>
-        <item><![CDATA[bot_user_id]]></item>
-      </MentionedUserNameList>
+      <Content><![CDATA[@men-bot hello]]></Content>
+      <MsgId>msg-1</MsgId>
+      <AgentID>100001</AgentID>
+      <AtUser><![CDATA[bot_user_1]]></AtUser>
     </xml>
     """
 
-    assert {:ok, event} =
-             QiweiAdapter.normalize(xml,
-               tenant_resolver: fn corp_id, agent_id -> "#{corp_id}:#{agent_id}" end
-             )
+    assert {:ok, event} = QiweiAdapter.normalize(%{xml: xml})
 
-    assert event.request_id == "123456"
+    assert event.request_id == "msg-1"
     assert event.channel == "qiwei"
-    assert event.user_id == "user_a"
+    assert event.user_id == "user-1"
     assert event.payload.msg_type == "text"
-    assert event.payload.content == "@助手 你好"
-    assert event.payload.corp_id == "wwcorp"
-    assert event.payload.agent_id == 1_000_002
-    assert event.payload.tenant_id == "wwcorp:1000002"
-    assert event.payload.at_user_ids == ["bot_user_id"]
+    assert event.payload.tenant_id == "corp-1"
+    assert event.payload.content == "@men-bot hello"
+    assert event.payload.at_list == ["bot_user_1"]
+    assert event.metadata.mention_required == true
+    assert event.metadata.mentioned == true
   end
 
-  test "事件消息标准化" do
+  test "事件消息标准化：用 from_user+create_time+event+event_key 生成 request_id" do
     xml = """
     <xml>
-      <ToUserName><![CDATA[wwcorp]]></ToUserName>
-      <FromUserName><![CDATA[user_b]]></FromUserName>
-      <CreateTime>1700000002</CreateTime>
+      <ToUserName><![CDATA[corp-1]]></ToUserName>
+      <FromUserName><![CDATA[user-2]]></FromUserName>
+      <CreateTime>1700000001</CreateTime>
       <MsgType><![CDATA[event]]></MsgType>
       <Event><![CDATA[enter_agent]]></Event>
-      <EventKey><![CDATA[key1]]></EventKey>
-      <AgentID>1000003</AgentID>
+      <EventKey><![CDATA[key-1]]></EventKey>
+      <AgentID>100001</AgentID>
     </xml>
     """
 
-    assert {:ok, event} = QiweiAdapter.normalize(xml)
+    assert {:ok, event} = QiweiAdapter.normalize(%{xml: xml})
+
     assert event.payload.msg_type == "event"
     assert event.payload.event == "enter_agent"
-    assert event.payload.event_key == "key1"
-    assert String.starts_with?(event.request_id, "qiwei-")
+    assert event.payload.event_key == "key-1"
+    assert event.request_id == "event:user-2:1700000001:enter_agent:key-1"
   end
 
-  test "非 text 消息标准化" do
+  test "非 text/事件类型也可入链路（image 示例）" do
     xml = """
     <xml>
-      <ToUserName><![CDATA[wwcorp]]></ToUserName>
-      <FromUserName><![CDATA[user_c]]></FromUserName>
-      <CreateTime>1700000003</CreateTime>
+      <ToUserName><![CDATA[corp-2]]></ToUserName>
+      <FromUserName><![CDATA[user-3]]></FromUserName>
+      <CreateTime>1700000002</CreateTime>
       <MsgType><![CDATA[image]]></MsgType>
-      <PicUrl><![CDATA[https://example.com/a.png]]></PicUrl>
-      <MsgId>987654</MsgId>
-      <AgentID>1000004</AgentID>
+      <PicUrl><![CDATA[https://img.example.com/a.png]]></PicUrl>
+      <MsgId>msg-image-1</MsgId>
+      <AgentID>100002</AgentID>
     </xml>
     """
 
-    assert {:ok, event} = QiweiAdapter.normalize(xml)
+    assert {:ok, event} = QiweiAdapter.normalize(%{xml: xml})
     assert event.payload.msg_type == "image"
-    assert event.payload.content == nil
-    assert event.request_id == "987654"
+    assert event.request_id == "msg-image-1"
+    assert event.metadata.mentioned == false
   end
 
-  test "缺少关键字段返回错误" do
+  test "mention 兼容解析：结构化 at 不命中时走文本 @bot_name 兜底" do
     xml = """
     <xml>
-      <FromUserName><![CDATA[user_d]]></FromUserName>
+      <ToUserName><![CDATA[corp-3]]></ToUserName>
+      <FromUserName><![CDATA[user-4]]></FromUserName>
+      <CreateTime>1700000003</CreateTime>
       <MsgType><![CDATA[text]]></MsgType>
+      <Content><![CDATA[@men-bot fallback mention]]></Content>
+      <MsgId>msg-3</MsgId>
+      <AgentID>100003</AgentID>
     </xml>
     """
 
-    assert {:error, error} = QiweiAdapter.normalize(xml)
-    assert error.code == "INVALID_XML"
-  end
-
-  test "幂等指纹提取" do
-    event = %{
-      payload: %{
-        corp_id: "wwcorp",
-        agent_id: 1_000_001,
-        msg_id: "mid-1",
-        from_user: "u1",
-        create_time: 1_700_000_000,
-        event: "enter_agent",
-        event_key: "k1"
-      }
-    }
-
-    fp = QiweiAdapter.idempotency_fingerprint(event)
-
-    assert fp.corp_id == "wwcorp"
-    assert fp.agent_id == 1_000_001
-    assert fp.msg_id == "mid-1"
-    assert fp.from_user == "u1"
+    assert {:ok, event} = QiweiAdapter.normalize(%{xml: xml})
+    assert event.metadata.mentioned == true
   end
 end

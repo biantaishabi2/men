@@ -1,111 +1,147 @@
 defmodule Men.Channels.Egress.QiweiPassiveReplyAdapter do
   @moduledoc """
-  企微被动回复适配：基于 inbound_event 与 dispatch 结果决定是否回 XML。
+  企微被动回复适配：判定是否需要回复并生成被动回复 XML。
   """
 
-  @max_reply_len 1_024
+  @type reply_result :: {:success} | {:xml, binary()}
 
-  @spec build(map(), {:ok, map()} | {:error, map()} | term(), keyword()) ::
-          {:xml, binary()} | :success
-  def build(inbound_event, dispatch_result, opts \\ [])
-
-  def build(inbound_event, dispatch_result, opts) when is_map(inbound_event) do
+  @spec build(map(), term(), keyword()) :: reply_result()
+  def build(inbound_event, dispatch_result, opts \\ []) when is_map(inbound_event) do
     payload = Map.get(inbound_event, :payload, %{})
-    msg_type = Map.get(payload, :msg_type)
 
-    if msg_type == "text" and allow_reply?(payload, opts) do
-      content = dispatch_content(dispatch_result, opts)
+    if should_reply?(inbound_event, opts) do
+      case reply_content(dispatch_result) do
+        nil ->
+          {:success}
 
-      if is_binary(content) and content != "" do
-        {:xml, build_text_reply_xml(payload, trim_reply(content))}
-      else
-        :success
+        content ->
+          truncated = truncate_content(content, max_chars(opts))
+
+          if truncated == "" do
+            {:success}
+          else
+            {:xml,
+             build_text_xml(
+               map_value(payload, :from_user, ""),
+               map_value(payload, :to_user, ""),
+               truncated
+             )}
+          end
       end
     else
-      :success
+      {:success}
     end
   end
 
-  def build(_inbound_event, _dispatch_result, _opts), do: :success
+  @spec should_reply?(map(), keyword()) :: boolean()
+  def should_reply?(inbound_event, opts \\ []) when is_map(inbound_event) do
+    payload = Map.get(inbound_event, :payload, %{})
+    msg_type = map_value(payload, :msg_type, "")
 
-  @spec mentioned?(map(), keyword()) :: boolean()
-  def mentioned?(payload, opts \\ [])
-
-  def mentioned?(payload, opts) when is_map(payload) do
-    bot_user_id = Keyword.get(opts, :bot_user_id)
-    bot_name = Keyword.get(opts, :bot_name)
-
-    structured_hit =
-      case bot_user_id do
-        value when is_binary(value) and value != "" ->
-          at_user_ids = Map.get(payload, :at_user_ids, [])
-          Enum.any?(at_user_ids, &(&1 == value))
-
-        _ ->
-          false
+    if msg_type != "text" do
+      false
+    else
+      if require_mention?(opts) do
+        mentioned_by_structured_at?(payload, bot_user_id(opts)) or
+          mentioned_by_name?(payload, bot_name(opts))
+      else
+        true
       end
-
-    fallback_hit =
-      case {Map.get(payload, :content), bot_name} do
-        {content, name} when is_binary(content) and is_binary(name) and name != "" ->
-          String.contains?(content, "@" <> name)
-
-        _ ->
-          false
-      end
-
-    structured_hit or fallback_hit
-  end
-
-  def mentioned?(_payload, _opts), do: false
-
-  defp allow_reply?(payload, opts) do
-    require_mention = Keyword.get(opts, :require_mention, true)
-    not require_mention or mentioned?(payload, opts)
-  end
-
-  defp dispatch_content({:ok, %{payload: %{text: text}}}, _opts) when is_binary(text), do: text
-
-  defp dispatch_content({:ok, %{payload: payload}}, _opts) when is_map(payload) do
-    case Map.get(payload, :text) do
-      text when is_binary(text) -> text
-      _ -> nil
     end
   end
 
-  defp dispatch_content({:ok, _}, opts), do: Keyword.get(opts, :fallback_text)
-
-  # callback 失败时默认不回错误 XML，避免触发企微重试风暴。
-  defp dispatch_content({:error, _}, _opts), do: nil
-
-  defp dispatch_content(_other, opts), do: Keyword.get(opts, :fallback_text)
-
-  defp build_text_reply_xml(payload, content) do
-    to_user = Map.get(payload, :from_user, "")
-    from_user = Map.get(payload, :corp_id, "")
-    create_time = System.system_time(:second)
-
-    """
-    <xml>
-    <ToUserName><![CDATA[#{escape_cdata(to_user)}]]></ToUserName>
-    <FromUserName><![CDATA[#{escape_cdata(from_user)}]]></FromUserName>
-    <CreateTime>#{create_time}</CreateTime>
-    <MsgType><![CDATA[text]]></MsgType>
-    <Content><![CDATA[#{escape_cdata(content)}]]></Content>
-    </xml>
-    """
-    |> String.trim()
+  defp reply_content({:ok, %{} = result}) do
+    result
+    |> Map.get(:payload, %{})
+    |> map_value(:text, nil)
+    |> normalize_content()
   end
 
-  defp trim_reply(content) do
-    if String.length(content) <= @max_reply_len do
+  defp reply_content(_), do: nil
+
+  defp normalize_content(content) when is_binary(content), do: String.trim(content)
+  defp normalize_content(content) when is_atom(content), do: Atom.to_string(content)
+  defp normalize_content(_), do: nil
+
+  defp mentioned_by_structured_at?(payload, bot_user_id)
+       when is_binary(bot_user_id) and bot_user_id != "" do
+    payload
+    |> map_value(:at_list, [])
+    |> Enum.member?(bot_user_id)
+  end
+
+  defp mentioned_by_structured_at?(_payload, _bot_user_id), do: false
+
+  defp mentioned_by_name?(payload, bot_name) when is_binary(bot_name) and bot_name != "" do
+    content = map_value(payload, :content, "")
+    String.contains?(content, "@" <> bot_name)
+  end
+
+  defp mentioned_by_name?(_payload, _bot_name), do: false
+
+  defp truncate_content(content, max_chars) when is_binary(content) and is_integer(max_chars) do
+    if String.length(content) <= max_chars do
       content
     else
-      String.slice(content, 0, @max_reply_len)
+      String.slice(content, 0, max_chars)
     end
   end
 
-  defp escape_cdata(content) do
-    String.replace(content, "]]>", "]] ]><![CDATA[>")
+  defp build_text_xml(to_user, from_user, content) do
+    safe_content = escape_cdata(content)
+
+    [
+      "<xml>",
+      "<ToUserName><![CDATA[",
+      to_user,
+      "]]></ToUserName>",
+      "<FromUserName><![CDATA[",
+      from_user,
+      "]]></FromUserName>",
+      "<CreateTime>",
+      Integer.to_string(System.system_time(:second)),
+      "</CreateTime>",
+      "<MsgType><![CDATA[text]]></MsgType>",
+      "<Content><![CDATA[",
+      safe_content,
+      "]]></Content>",
+      "</xml>"
+    ]
+    |> IO.iodata_to_binary()
   end
+
+  # 避免内容中出现 CDATA 结束标记导致 XML 非法。
+  defp escape_cdata(content) when is_binary(content) do
+    String.replace(content, "]]>", "]]]]><![CDATA[>")
+  end
+
+  defp max_chars(opts) do
+    Keyword.get(opts, :max_chars, qiwei_config() |> Keyword.get(:reply_max_chars, 600))
+  end
+
+  defp require_mention?(opts) do
+    Keyword.get(
+      opts,
+      :require_mention,
+      qiwei_config() |> Keyword.get(:reply_require_mention, true)
+    )
+  end
+
+  defp bot_user_id(opts) do
+    Keyword.get(opts, :bot_user_id, qiwei_config() |> Keyword.get(:bot_user_id))
+  end
+
+  defp bot_name(opts) do
+    Keyword.get(opts, :bot_name, qiwei_config() |> Keyword.get(:bot_name))
+  end
+
+  defp qiwei_config do
+    Application.get_env(:men, :qiwei, [])
+  end
+
+  defp map_value(map, key, default) when is_map(map) do
+    Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+  end
+
+  defp map_value(_map, _key, default), do: default
 end
