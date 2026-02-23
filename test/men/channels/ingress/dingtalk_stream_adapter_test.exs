@@ -20,6 +20,8 @@ defmodule Men.Channels.Ingress.DingtalkStreamAdapterTest do
     assert event.group_id == "cid-1"
     assert event.session_key == "dingtalk:user-1"
     assert event.payload.content == "hello"
+    assert event.metadata.mention_required == false
+    assert event.metadata.mentioned == false
   end
 
   test "标准化成功（text.content）" do
@@ -35,6 +37,8 @@ defmodule Men.Channels.Ingress.DingtalkStreamAdapterTest do
     assert event.run_id == "run-stream-msg-2"
     assert event.session_key == "dingtalk:user-2"
     assert event.payload.content == "hello from text"
+    assert event.metadata.mention_required == false
+    assert event.metadata.mentioned == false
   end
 
   test "conversation_id 包含特殊字符也可标准化" do
@@ -48,6 +52,24 @@ defmodule Men.Channels.Ingress.DingtalkStreamAdapterTest do
     assert {:ok, event} = DingtalkStreamAdapter.normalize(params)
     assert event.session_key == "dingtalk:user-3"
     assert event.group_id == "cid3xGYPRfVbgk+8Aqz5W3FktoC80ojZluBPa0JMxfifuk="
+    assert event.metadata.mention_required == false
+  end
+
+  test "群聊默认要求 @，并识别 isInAtList" do
+    params = %{
+      "senderStaffId" => "user-4",
+      "conversationId" => "cid-group",
+      "msgId" => "msg-4",
+      "text" => %{"content" => "hello"},
+      "raw_payload" => %{
+        "conversationType" => "2",
+        "isInAtList" => true
+      }
+    }
+
+    assert {:ok, event} = DingtalkStreamAdapter.normalize(params)
+    assert event.metadata.mention_required == true
+    assert event.metadata.mentioned == true
   end
 
   test "缺少 sender 返回错误" do
