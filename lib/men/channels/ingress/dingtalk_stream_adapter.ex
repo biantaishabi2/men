@@ -45,6 +45,8 @@ defmodule Men.Channels.Ingress.DingtalkStreamAdapter do
           sender_id: sender_id,
           conversation_id: conversation_id,
           message_id: message_id,
+          mention_required: mention_required?(params),
+          mentioned: mentioned?(params, content),
           source: "dingtalk_stream",
           raw_payload: Map.get(params, "raw_payload", params)
         }
@@ -116,6 +118,33 @@ defmodule Men.Channels.Ingress.DingtalkStreamAdapter do
         {:ok, "run-stream-" <> suffix}
     end
   end
+
+  # 钉钉 Stream 私聊默认不要求 @，群聊保持 @ 门禁，避免群内噪音触发。
+  defp mention_required?(params) when is_map(params) do
+    raw = Map.get(params, "raw_payload", params)
+    conversation_type = Map.get(raw, "conversationType") || Map.get(raw, "conversation_type")
+
+    case conversation_type do
+      value when value in ["2", 2, "group"] -> true
+      _ -> false
+    end
+  end
+
+  defp mention_required?(_), do: false
+
+  defp mentioned?(params, content) when is_map(params) do
+    raw = Map.get(params, "raw_payload", params)
+
+    case Map.get(raw, "isInAtList") do
+      value when is_boolean(value) ->
+        value
+
+      _ ->
+        String.contains?(content, "@")
+    end
+  end
+
+  defp mentioned?(_params, content), do: String.contains?(content, "@")
 
   defp invalid_request(reason) do
     {:error,
