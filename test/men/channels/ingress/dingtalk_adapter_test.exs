@@ -45,10 +45,14 @@ defmodule Men.Channels.Ingress.DingtalkAdapterTest do
              sender_id: "user-1",
              conversation_id: "conv-1",
              content: "hello dingtalk",
+             tenant_id: nil,
+             mentioned: false,
              raw_payload: body
            }
 
     assert event.metadata.raw_payload == body
+    assert event.metadata.mention_required == true
+    assert event.metadata.mentioned == false
   end
 
   test "签名错误会被拒绝" do
