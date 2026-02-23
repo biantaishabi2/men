@@ -93,4 +93,12 @@ defmodule Men.Gateway.ReceiptTest do
     assert_receive {:gateway_event, %{type: "action_receipt", action_id: "action-concurrent-1"}}
     refute_receive {:gateway_event, %{type: "action_receipt", action_id: "action-concurrent-1"}}
   end
+
+  test "safe_new 对缺失 run_id/action_id 返回错误" do
+    assert {:error, {:invalid_required_field, :run_id}} =
+             Receipt.safe_new(%{action_id: "a-1"})
+
+    assert {:error, {:invalid_required_field, :action_id}} =
+             Receipt.safe_new(%{run_id: "r-1"})
+  end
 end

@@ -43,25 +43,37 @@ defmodule Men.Gateway.Receipt do
           ts: integer()
         }
 
+  @spec safe_new(map()) :: {:ok, t()} | {:error, term()}
+  def safe_new(attrs) when is_map(attrs) do
+    with {:ok, run_id} <- fetch_required_id(attrs, :run_id),
+         {:ok, action_id} <- fetch_required_id(attrs, :action_id) do
+      {:ok,
+       %__MODULE__{
+         receipt_id:
+           Map.get(attrs, :receipt_id) ||
+             Map.get(attrs, "receipt_id") ||
+             build_receipt_id(run_id, action_id),
+         run_id: run_id,
+         action_id: action_id,
+         status: normalize_status(Map.get(attrs, :status) || Map.get(attrs, "status")),
+         code: normalize_binary(Map.get(attrs, :code) || Map.get(attrs, "code"), "UNKNOWN"),
+         message: normalize_binary(Map.get(attrs, :message) || Map.get(attrs, "message"), "unknown"),
+         data: normalize_data(Map.get(attrs, :data) || Map.get(attrs, "data") || %{}),
+         retryable: Map.get(attrs, :retryable) == true or Map.get(attrs, "retryable") == true,
+         ts: normalize_ts(Map.get(attrs, :ts) || Map.get(attrs, "ts"))
+       }}
+    end
+  end
+
   @spec new(map()) :: t()
   def new(attrs) when is_map(attrs) do
-    run_id = Map.get(attrs, :run_id) || Map.get(attrs, "run_id") || "unknown_run"
-    action_id = Map.get(attrs, :action_id) || Map.get(attrs, "action_id") || "unknown_action"
+    case safe_new(attrs) do
+      {:ok, receipt} ->
+        receipt
 
-    %__MODULE__{
-      receipt_id:
-        Map.get(attrs, :receipt_id) ||
-          Map.get(attrs, "receipt_id") ||
-          build_receipt_id(run_id, action_id),
-      run_id: run_id,
-      action_id: action_id,
-      status: normalize_status(Map.get(attrs, :status) || Map.get(attrs, "status")),
-      code: normalize_binary(Map.get(attrs, :code) || Map.get(attrs, "code"), "UNKNOWN"),
-      message: normalize_binary(Map.get(attrs, :message) || Map.get(attrs, "message"), "unknown"),
-      data: normalize_data(Map.get(attrs, :data) || Map.get(attrs, "data") || %{}),
-      retryable: Map.get(attrs, :retryable) == true or Map.get(attrs, "retryable") == true,
-      ts: normalize_ts(Map.get(attrs, :ts) || Map.get(attrs, "ts"))
-    }
+      {:error, reason} ->
+        raise ArgumentError, "invalid receipt attrs: #{inspect(reason)}"
+    end
   end
 
   @spec record(t(), keyword()) :: {:ok, :stored | :duplicate}
@@ -127,6 +139,16 @@ defmodule Men.Gateway.Receipt do
 
   defp normalize_ts(ts) when is_integer(ts) and ts > 0, do: ts
   defp normalize_ts(_), do: System.system_time(:millisecond)
+
+  defp fetch_required_id(attrs, key) do
+    value = Map.get(attrs, key) || Map.get(attrs, Atom.to_string(key))
+
+    if is_binary(value) and value != "" do
+      {:ok, value}
+    else
+      {:error, {:invalid_required_field, key}}
+    end
+  end
 
   defp allow_all_policy do
     %{

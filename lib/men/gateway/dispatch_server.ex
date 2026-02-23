@@ -1227,7 +1227,7 @@ defmodule Men.Gateway.DispatchServer do
     else
       next_state =
         state
-        |> put_pending_actions(context.session_key, actions)
+        |> put_pending_actions(context.session_key, context.run_id, actions)
         |> execute_actions(context, actions)
 
       receipts = Map.get(next_state.recent_receipts_by_session, context.session_key, [])
@@ -1298,25 +1298,26 @@ defmodule Men.Gateway.DispatchServer do
 
   defp extract_actions(_), do: []
 
-  defp put_pending_actions(state, session_key, actions) do
-    normalized = Enum.map(actions, &normalize_pending_action/1)
+  defp put_pending_actions(state, session_key, run_id, actions) do
+    normalized = Enum.map(actions, &normalize_pending_action(&1, run_id))
     existing = Map.get(state.pending_actions_by_session, session_key, [])
     merged = merge_pending_actions(existing, normalized)
     Map.update!(state, :pending_actions_by_session, &Map.put(&1, session_key, merged))
   end
 
   defp merge_pending_actions(existing, incoming) do
-    incoming_action_ids = incoming |> Enum.map(& &1.action_id) |> MapSet.new()
-    preserved = Enum.reject(existing, &MapSet.member?(incoming_action_ids, &1.action_id))
+    incoming_keys = incoming |> Enum.map(&pending_action_key/1) |> MapSet.new()
+    preserved = Enum.reject(existing, &MapSet.member?(incoming_keys, pending_action_key(&1)))
     preserved ++ incoming
   end
 
   defp ack_pending_action(state, session_key, receipt) do
     pending = Map.get(state.pending_actions_by_session, session_key, [])
+    receipt_key = {receipt.run_id, receipt.action_id}
 
     next_pending =
       if receipt.status == :ok or receipt.retryable == false do
-        Enum.reject(pending, fn item -> item.action_id == receipt.action_id end)
+        Enum.reject(pending, fn item -> pending_action_key(item) == receipt_key end)
       else
         pending
       end
@@ -1350,11 +1351,19 @@ defmodule Men.Gateway.DispatchServer do
   defp normalize_receipt_map(%Receipt{} = receipt), do: Map.from_struct(receipt)
   defp normalize_receipt_map(%{} = receipt), do: receipt
 
-  defp normalize_pending_action(action) do
+  defp normalize_pending_action(action, run_id) do
     %{
+      run_id: run_id,
       action_id: Map.get(action, :action_id) || Map.get(action, "action_id") || "unknown_action",
       name: Map.get(action, :name) || Map.get(action, "name") || "unknown",
       params: Map.get(action, :params) || Map.get(action, "params") || %{}
+    }
+  end
+
+  defp pending_action_key(action) do
+    {
+      Map.get(action, :run_id) || Map.get(action, "run_id"),
+      Map.get(action, :action_id) || Map.get(action, "action_id")
     }
   end
 
@@ -1523,21 +1532,20 @@ defmodule Men.Gateway.DispatchServer do
         Map.get(receipt_attrs, "session_key") ||
         "global"
 
-    receipt = Receipt.new(receipt_attrs)
+    with {:ok, receipt} <- Receipt.safe_new(receipt_attrs),
+         {:ok, store_status} <-
+           Receipt.record(receipt,
+             session_key: session_key,
+             repl_store_opts: state.repl_store_opts,
+             event_topic: state.event_bus_topic
+           ) do
+      next_state =
+        state
+        |> put_recent_receipt(session_key, receipt)
+        |> ack_pending_action(session_key, receipt)
 
-    case Receipt.record(receipt,
-           session_key: session_key,
-           repl_store_opts: state.repl_store_opts,
-           event_topic: state.event_bus_topic
-         ) do
-      {:ok, store_status} ->
-        next_state =
-          state
-          |> put_recent_receipt(session_key, receipt)
-          |> ack_pending_action(session_key, receipt)
-
-        {:ok, receipt, store_status, next_state}
-
+      {:ok, receipt, store_status, next_state}
+    else
       {:error, reason} ->
         {:error, reason}
     end

@@ -274,6 +274,82 @@ defmodule Men.Integration.AgentLoopReceiptFlowTest do
     refute_receive {:gateway_event, %{type: "action_receipt", action_id: "act-idem-concurrent"}}
   end
 
+  test "pending 按 run_id+action_id 隔离，ack 不应跨 run 误删", %{server: server} do
+    event_1 = %{
+      request_id: "req-collision-1",
+      run_id: "run-collision-1",
+      payload: %{scenario: "retryable_fail", messages: [%{role: "user", content: "turn1"}]},
+      channel: "feishu",
+      user_id: "u-collision"
+    }
+
+    event_2 = %{
+      request_id: "req-collision-2",
+      run_id: "run-collision-2",
+      payload: %{scenario: "retryable_fail", messages: [%{role: "user", content: "turn2"}]},
+      channel: "feishu",
+      user_id: "u-collision"
+    }
+
+    assert {:ok, _} = DispatchServer.dispatch(server, event_1)
+    assert {:ok, _} = DispatchServer.dispatch(server, event_2)
+
+    assert {:ok, %{status: ack_status}} =
+             DispatchServer.push_receipt(server, %{
+               session_key: "feishu:u-collision",
+               run_id: "run-collision-1",
+               action_id: "act-retry",
+               status: :failed,
+               code: "PERM_ACK",
+               message: "manual-ack",
+               data: %{},
+               retryable: false,
+               ts: System.system_time(:millisecond)
+             })
+
+    assert ack_status in [:stored, :duplicate]
+
+    event_3 = %{
+      request_id: "req-collision-3",
+      payload: %{scenario: "no_action", messages: [%{role: "user", content: "turn3"}]},
+      channel: "feishu",
+      user_id: "u-collision"
+    }
+
+    assert {:ok, _} = DispatchServer.dispatch(server, event_3)
+    assert_receive {:bridge_prompt, prompt, %{request_id: "req-collision-3"}}
+
+    [_base_prompt, hud_payload] = String.split(prompt, "\n\n[HUD]\n", parts: 2)
+    assert {:ok, hud_map} = Jason.decode(hud_payload)
+    pending_actions = get_in(hud_map, ["frame", "pending_actions"]) || []
+
+    refute Enum.any?(pending_actions, fn item ->
+             item["run_id"] == "run-collision-1" and item["action_id"] == "act-retry"
+           end)
+
+    assert Enum.any?(pending_actions, fn item ->
+             item["run_id"] == "run-collision-2" and item["action_id"] == "act-retry"
+           end)
+  end
+
+  test "push_receipt 缺失 run_id/action_id 应返回错误且不落库", %{server: server} do
+    base = %{
+      session_key: "feishu:u-invalid-receipt",
+      status: :ok,
+      code: "OK",
+      message: "done",
+      data: %{},
+      retryable: false,
+      ts: System.system_time(:millisecond)
+    }
+
+    assert {:error, {:invalid_required_field, :run_id}} =
+             DispatchServer.push_receipt(server, Map.delete(base, :run_id))
+
+    assert {:error, {:invalid_required_field, :action_id}} =
+             DispatchServer.push_receipt(server, Map.put(base, :run_id, "run-invalid-1"))
+  end
+
   test "延迟回流: 回执晚到可被下一轮消费", %{server: server} do
     event_1 = %{
       request_id: "req-delay-1",
