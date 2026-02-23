@@ -186,7 +186,7 @@ defmodule Men.Integration.DingtalkWebhookFlowTest do
 
   test "session_not_found 在 webhook 主链路单次自愈且不重复出站", %{conn: conn} do
     event_payload =
-      payload("evt-integration-5", "user-heal", "conv-heal", "session_not_found_once")
+      payload("evt-integration-5", "user-heal", "conv-heal", "@bot session_not_found_once")
 
     assert accepted?(post_signed(conn, event_payload))
 

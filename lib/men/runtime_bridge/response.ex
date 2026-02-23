@@ -1,14 +1,23 @@
 defmodule Men.RuntimeBridge.Response do
   @moduledoc """
-  Runtime 成功响应结构。
+  Runtime 成功响应结构（兼容新旧字段）。
   """
 
-  @enforce_keys [:session_key, :content]
-  defstruct [:session_key, :content, metadata: %{}]
+  defstruct [
+    :runtime_id,
+    :session_id,
+    :payload,
+    :session_key,
+    :content,
+    metadata: %{}
+  ]
 
   @type t :: %__MODULE__{
-          session_key: String.t(),
-          content: String.t(),
+          runtime_id: String.t() | nil,
+          session_id: String.t() | nil,
+          payload: term() | nil,
+          session_key: String.t() | nil,
+          content: String.t() | nil,
           metadata: map()
         }
 end
