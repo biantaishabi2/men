@@ -82,7 +82,7 @@ defmodule Men.Gateway.DispatchServer do
           :legacy_bridge_adapter,
           Keyword.get(opts, :bridge_adapter, Keyword.fetch!(config, :bridge_adapter))
         ),
-      zcpg_client: Keyword.get(opts, :zcpg_client, Men.Bridge.ZcpgClient),
+      zcpg_client: Keyword.get(opts, :zcpg_client, Men.RuntimeBridge.ZcpgClient),
       cutover_policy: Keyword.get(opts, :cutover_policy, Men.Dispatch.CutoverPolicy),
       zcpg_cutover_config: Keyword.get(opts, :zcpg_cutover_config, cutover_config),
       zcpg_cutover_dynamic?: dynamic_cutover?,

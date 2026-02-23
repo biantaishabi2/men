@@ -28,6 +28,19 @@ parse_positive_integer_env = fn env_name, default ->
   end
 end
 
+parse_non_negative_integer_env = fn env_name, default ->
+  case System.get_env(env_name) do
+    nil ->
+      default
+
+    value ->
+      case Integer.parse(value) do
+        {parsed, ""} when parsed >= 0 -> parsed
+        _ -> default
+      end
+  end
+end
+
 parse_boolean_env = fn env_name, default ->
   case System.get_env(env_name) do
     nil ->
@@ -78,6 +91,20 @@ parse_invalidation_codes_env = fn env_name, default ->
   end
 end
 
+parse_module_env = fn env_name, default ->
+  case System.get_env(env_name) do
+    nil ->
+      default
+
+    value ->
+      case String.downcase(String.trim(value)) do
+        "ets" -> Men.Channels.Ingress.QiweiIdempotency.Backend.ETS
+        "redis" -> Men.Channels.Ingress.QiweiIdempotency.Backend.Redis
+        _ -> default
+      end
+  end
+end
+
 config :men, :runtime_bridge,
   # 支持仅通过配置切换 bridge 实现，不做运行时动态开关。
   bridge_impl: runtime_bridge_impl,
@@ -101,8 +128,16 @@ config :men, Men.Gateway.SessionCoordinator,
 config :men, Men.Gateway.DispatchServer, bridge_adapter: runtime_bridge_impl
 
 config :men, :zcpg_cutover,
-  enabled: parse_boolean_env.("ZCPG_CUTOVER_ENABLED", false),
-  tenant_whitelist: parse_string_list_env.("ZCPG_CUTOVER_TENANT_WHITELIST", []),
+  enabled:
+    parse_boolean_env.(
+      "QIWEI_CUTOVER_ENABLED",
+      parse_boolean_env.("ZCPG_CUTOVER_ENABLED", false)
+    ),
+  tenant_whitelist:
+    parse_string_list_env.(
+      "QIWEI_CUTOVER_TENANT_WHITELIST",
+      parse_string_list_env.("ZCPG_CUTOVER_TENANT_WHITELIST", [])
+    ),
   env_override: parse_boolean_env.("ZCPG_CUTOVER_ENV_OVERRIDE", false),
   timeout_ms: parse_positive_integer_env.("ZCPG_CUTOVER_TIMEOUT_MS", 8_000),
   breaker: [
@@ -110,6 +145,30 @@ config :men, :zcpg_cutover,
     window_seconds: parse_positive_integer_env.("ZCPG_CUTOVER_BREAKER_WINDOW_SECONDS", 30),
     cooldown_seconds: parse_positive_integer_env.("ZCPG_CUTOVER_BREAKER_COOLDOWN_SECONDS", 60)
   ]
+
+config :men, MenWeb.Webhooks.QiweiController,
+  callback_enabled: parse_boolean_env.("QIWEI_CALLBACK_ENABLED", false),
+  token: System.get_env("QIWEI_CALLBACK_TOKEN"),
+  encoding_aes_key: System.get_env("QIWEI_CALLBACK_ENCODING_AES_KEY"),
+  receive_id: System.get_env("QIWEI_RECEIVE_ID"),
+  bot_name: System.get_env("QIWEI_BOT_NAME"),
+  bot_user_id: System.get_env("QIWEI_BOT_USER_ID"),
+  reply_require_mention: parse_boolean_env.("QIWEI_REPLY_REQUIRE_MENTION", true),
+  callback_timeout_ms: parse_positive_integer_env.("QIWEI_CALLBACK_TIMEOUT_MS", 8_000),
+  idempotency_ttl_seconds: parse_positive_integer_env.("QIWEI_IDEMPOTENCY_TTL_SECONDS", 120),
+  idempotency_backend:
+    parse_module_env.(
+      "QIWEI_IDEMPOTENCY_BACKEND",
+      Men.Channels.Ingress.QiweiIdempotency.Backend.Redis
+    )
+
+config :men, Men.Channels.Ingress.QiweiIdempotency.Backend.Redis,
+  url: System.get_env("QIWEI_IDEMPOTENCY_REDIS_URL") || System.get_env("REDIS_URL"),
+  host: System.get_env("QIWEI_IDEMPOTENCY_REDIS_HOST") || "127.0.0.1",
+  port: parse_positive_integer_env.("QIWEI_IDEMPOTENCY_REDIS_PORT", 6379),
+  password: System.get_env("QIWEI_IDEMPOTENCY_REDIS_PASSWORD"),
+  database: parse_non_negative_integer_env.("QIWEI_IDEMPOTENCY_REDIS_DB", 0),
+  timeout_ms: parse_positive_integer_env.("QIWEI_IDEMPOTENCY_REDIS_TIMEOUT_MS", 1_000)
 
 gong_rpc_node_start_type =
   case System.get_env("GONG_RPC_NODE_START_TYPE") do
