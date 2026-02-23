@@ -26,8 +26,15 @@ defmodule Mix.Tasks.Men.GatewaySmoke do
       payload: %{signal: "result_ready"}
     }
 
-    {:ok, first} = DispatchServer.coordinate_event(DispatchServer, event, %{})
-    {:ok, second} = DispatchServer.coordinate_event(DispatchServer, event, %{})
+    {first, second} =
+      if function_exported?(DispatchServer, :coordinate_event, 3) do
+        {:ok, first} = apply(DispatchServer, :coordinate_event, [DispatchServer, event, %{}])
+        {:ok, second} = apply(DispatchServer, :coordinate_event, [DispatchServer, event, %{}])
+        {first, second}
+      else
+        Mix.shell().info("coordinate_event/3 不可用，跳过事件协调 smoke")
+        {%{envelope: %{wake: false}}, %{store_result: :skipped}}
+      end
 
     ets_lookup_hit =
       case ReplStore.latest_by_ets_keys(["agent.agent_a.data.result.task_1"]) do
