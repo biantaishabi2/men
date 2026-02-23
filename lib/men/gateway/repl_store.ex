@@ -189,7 +189,8 @@ defmodule Men.Gateway.ReplStore do
 
       false ->
         case :ets.lookup(table, key) do
-          [{^key, current_expire_at}] when is_integer(current_expire_at) and current_expire_at < now ->
+          [{^key, current_expire_at}]
+          when is_integer(current_expire_at) and current_expire_at < now ->
             replace_expired_dedup(table, key, current_expire_at, expire_at, now)
 
           [{^key, _current_expire_at}] ->
