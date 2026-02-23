@@ -242,6 +242,38 @@ defmodule Men.Integration.AgentLoopReceiptFlowTest do
     refute_receive {:gateway_event, %{type: "action_receipt", action_id: "act-idem"}}
   end
 
+  test "并发重复回执幂等: 同 run_id+action_id 并发写入仅一次生效", %{server: server} do
+    attrs = %{
+      session_key: "feishu:u-idem-concurrent",
+      run_id: "run-idem-concurrent-1",
+      action_id: "act-idem-concurrent",
+      status: :ok,
+      code: "OK",
+      message: "done",
+      data: %{},
+      retryable: false,
+      ts: System.system_time(:millisecond)
+    }
+
+    results =
+      1..20
+      |> Task.async_stream(
+        fn _ -> DispatchServer.push_receipt(server, attrs) end,
+        max_concurrency: 20,
+        ordered: false,
+        timeout: 5_000
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    stored_count = Enum.count(results, &match?({:ok, %{status: :stored}}, &1))
+    duplicate_count = Enum.count(results, &match?({:ok, %{status: :duplicate}}, &1))
+
+    assert stored_count == 1
+    assert duplicate_count == 19
+    assert_receive {:gateway_event, %{type: "action_receipt", action_id: "act-idem-concurrent"}}
+    refute_receive {:gateway_event, %{type: "action_receipt", action_id: "act-idem-concurrent"}}
+  end
+
   test "延迟回流: 回执晚到可被下一轮消费", %{server: server} do
     event_1 = %{
       request_id: "req-delay-1",

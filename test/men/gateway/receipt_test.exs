@@ -52,4 +52,45 @@ defmodule Men.Gateway.ReceiptTest do
 
     refute_receive {:gateway_event, %{type: "action_receipt", action_id: "action-1"}}
   end
+
+  test "并发重复回执幂等: 同 run_id+action_id 仅一次 stored 且事件只发送一次", %{
+    opts: opts,
+    topic: topic
+  } do
+    receipt =
+      Receipt.new(%{
+        run_id: "run-concurrent-1",
+        action_id: "action-concurrent-1",
+        status: :ok,
+        code: "OK",
+        message: "done",
+        data: %{x: 1},
+        retryable: false,
+        ts: System.system_time(:millisecond)
+      })
+
+    results =
+      1..20
+      |> Task.async_stream(
+        fn _ ->
+          Receipt.record(receipt,
+            session_key: "s1",
+            repl_store_opts: opts,
+            event_topic: topic
+          )
+        end,
+        max_concurrency: 20,
+        ordered: false,
+        timeout: 5_000
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    stored_count = Enum.count(results, &(&1 == {:ok, :stored}))
+    duplicate_count = Enum.count(results, &(&1 == {:ok, :duplicate}))
+
+    assert stored_count == 1
+    assert duplicate_count == 19
+    assert_receive {:gateway_event, %{type: "action_receipt", action_id: "action-concurrent-1"}}
+    refute_receive {:gateway_event, %{type: "action_receipt", action_id: "action-concurrent-1"}}
+  end
 end

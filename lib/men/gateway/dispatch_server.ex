@@ -1242,10 +1242,14 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   defp execute_actions(state, context, actions) do
+    executor_opts =
+      case state.action_dispatcher do
+        dispatcher when is_function(dispatcher, 3) -> [dispatcher: dispatcher]
+        _ -> []
+      end
+
     receipts =
-      state.action_executor.execute_all(actions, context,
-        dispatcher: state.action_dispatcher || (&default_action_dispatcher/3)
-      )
+      state.action_executor.execute_all(actions, context, executor_opts)
 
     Enum.reduce(receipts, state, fn receipt, acc ->
       case Receipt.record(receipt,
@@ -1283,10 +1287,6 @@ defmodule Men.Gateway.DispatchServer do
     state
   end
 
-  defp default_action_dispatcher(action, _context, _opts) do
-    {:ok, %{action: action.name, action_id: action.action_id, result: :simulated}}
-  end
-
   defp extract_actions(%{} = bridge_payload) do
     actions =
       Map.get(bridge_payload, :actions) ||
@@ -1300,7 +1300,15 @@ defmodule Men.Gateway.DispatchServer do
 
   defp put_pending_actions(state, session_key, actions) do
     normalized = Enum.map(actions, &normalize_pending_action/1)
-    Map.update!(state, :pending_actions_by_session, &Map.put(&1, session_key, normalized))
+    existing = Map.get(state.pending_actions_by_session, session_key, [])
+    merged = merge_pending_actions(existing, normalized)
+    Map.update!(state, :pending_actions_by_session, &Map.put(&1, session_key, merged))
+  end
+
+  defp merge_pending_actions(existing, incoming) do
+    incoming_action_ids = incoming |> Enum.map(& &1.action_id) |> MapSet.new()
+    preserved = Enum.reject(existing, &MapSet.member?(incoming_action_ids, &1.action_id))
+    preserved ++ incoming
   end
 
   defp ack_pending_action(state, session_key, receipt) do
