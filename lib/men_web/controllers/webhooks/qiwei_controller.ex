@@ -104,6 +104,13 @@ defmodule MenWeb.Webhooks.QiweiController do
           {:error, error} -> {:error, error}
           _ -> {:error, %{code: "DISPATCH_UNKNOWN", reason: "unknown dispatch result"}}
         end
+      rescue
+        error ->
+          Logger.warning("qiwei.dispatch.raise",
+            error: Exception.format(:error, error, __STACKTRACE__)
+          )
+
+          {:error, %{code: "DISPATCH_UNAVAILABLE", reason: "dispatch server unavailable"}}
       catch
         :exit, reason ->
           Logger.warning("qiwei.dispatch.exit", reason: inspect(reason))

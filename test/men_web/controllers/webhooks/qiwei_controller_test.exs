@@ -10,6 +10,9 @@ defmodule MenWeb.Webhooks.QiweiControllerTest do
       content = get_in(event, [:payload, :content]) || ""
 
       cond do
+        String.contains?(content, "raise") ->
+          raise "dispatch raise for test"
+
         String.contains?(content, "timeout") ->
           {:error, %{code: "TIMEOUT", reason: "downstream timeout"}}
 
@@ -211,6 +214,22 @@ defmodule MenWeb.Webhooks.QiweiControllerTest do
       )
 
     conn = post_signed_callback(conn, message_xml, "nonce-post-5")
+
+    assert response(conn, 200) == "success"
+    assert_receive {:dispatch_called, _}
+  end
+
+  test "POST dispatch raise 降级 success", %{conn: conn} do
+    message_xml =
+      inbound_message_xml(
+        msg_type: "text",
+        from_user: "user_8",
+        content: "@MenBot raise",
+        msg_id: "msg-8",
+        create_time: 1_700_000_008
+      )
+
+    conn = post_signed_callback(conn, message_xml, "nonce-post-8")
 
     assert response(conn, 200) == "success"
     assert_receive {:dispatch_called, _}

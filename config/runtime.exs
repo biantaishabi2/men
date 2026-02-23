@@ -139,11 +139,7 @@ config :men, :zcpg_cutover,
       parse_string_list_env.("ZCPG_CUTOVER_TENANT_WHITELIST", [])
     ),
   env_override: parse_boolean_env.("ZCPG_CUTOVER_ENV_OVERRIDE", false),
-  timeout_ms:
-    parse_positive_integer_env.(
-      "QIWEI_CALLBACK_TIMEOUT_MS",
-      parse_positive_integer_env.("ZCPG_CUTOVER_TIMEOUT_MS", 8_000)
-    ),
+  timeout_ms: parse_positive_integer_env.("ZCPG_CUTOVER_TIMEOUT_MS", 8_000),
   breaker: [
     failure_threshold: parse_positive_integer_env.("ZCPG_CUTOVER_BREAKER_FAILURE_THRESHOLD", 5),
     window_seconds: parse_positive_integer_env.("ZCPG_CUTOVER_BREAKER_WINDOW_SECONDS", 30),

@@ -31,8 +31,7 @@ defmodule Men.Bridge.ZcpgClient do
         run_id: map_value(context, :run_id, generate_run_id()),
         session_key: map_value(context, :session_key, "unknown_session"),
         tenant_id: map_value(context, :tenant_id, "default_tenant"),
-        trace_id:
-          map_value(context, :trace_id, map_value(context, :request_id, "unknown_request")),
+        trace_id: map_value(context, :trace_id, map_value(context, :request_id, "unknown_request")),
         agent_id: map_value(context, :agent_id, "voucher_agent")
       }
     }
