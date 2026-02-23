@@ -25,6 +25,11 @@ config :men, Men.Channels.Egress.FeishuAdapter,
   base_url: "https://open.feishu.cn",
   bots: %{}
 
+config :men, :ops_policy,
+  telemetry_enabled: true,
+  db_source: Men.Ops.Policy.Source.DB,
+  config_source: Men.Ops.Policy.Source.Config
+
 # Configures the endpoint
 config :men, MenWeb.Endpoint,
   url: [host: "localhost"],

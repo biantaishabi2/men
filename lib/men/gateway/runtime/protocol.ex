@@ -118,8 +118,12 @@ defmodule Men.Gateway.Runtime.Protocol do
 
   defp detect_entity_type(payload) do
     cond do
-      has_any_key?(payload, ["mode", :mode]) -> :node
-      has_any_key?(payload, ["from", :from, "to", :to, "type", :type]) -> :edge
+      has_any_key?(payload, ["mode", :mode]) ->
+        :node
+
+      has_any_key?(payload, ["from", :from, "to", :to, "type", :type]) ->
+        :edge
+
       has_any_key?(
         payload,
         [
@@ -141,8 +145,11 @@ defmodule Men.Gateway.Runtime.Protocol do
       ) ->
         :node
 
-      has_any_key?(payload, ["id", :id]) -> :node
-      true -> :unknown
+      has_any_key?(payload, ["id", :id]) ->
+        :node
+
+      true ->
+        :unknown
     end
   end
 

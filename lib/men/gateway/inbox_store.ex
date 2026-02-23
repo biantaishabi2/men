@@ -19,6 +19,7 @@ defmodule Men.Gateway.InboxStore do
 
   def put(%EventEnvelope{} = envelope, opts) do
     options = normalize_opts(opts)
+
     with {:ok, event_table} <- ensure_table(Map.get(options, :event_table, @default_event_table)),
          {:ok, scope_table} <- ensure_table(Map.get(options, :scope_table, @default_scope_table)),
          :ok <- validate_envelope(envelope) do

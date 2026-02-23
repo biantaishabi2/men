@@ -26,6 +26,19 @@ parse_positive_integer_env = fn env_name, default ->
   end
 end
 
+parse_non_negative_integer_env = fn env_name, default ->
+  case System.get_env(env_name) do
+    nil ->
+      default
+
+    value ->
+      case Integer.parse(value) do
+        {parsed, ""} when parsed >= 0 -> parsed
+        _ -> default
+      end
+  end
+end
+
 parse_boolean_env = fn env_name, default ->
   case System.get_env(env_name) do
     nil ->
@@ -81,6 +94,29 @@ config :men, Men.Gateway.SessionCoordinator,
       "GATEWAY_SESSION_COORDINATOR_INVALIDATION_CODES",
       [:runtime_session_not_found]
     )
+
+default_acl_policy =
+  case System.get_env("OPS_POLICY_DEFAULT_ACL_JSON") do
+    nil ->
+      %{"mode" => "deny_all", "allow" => []}
+
+    raw ->
+      case Jason.decode(raw) do
+        {:ok, value} when is_map(value) -> value
+        _ -> %{"mode" => "deny_all", "allow" => []}
+      end
+  end
+
+config :men, :ops_policy,
+  cache_ttl_ms: parse_positive_integer_env.("OPS_POLICY_CACHE_TTL_MS", 60_000),
+  reconcile_interval_ms: parse_positive_integer_env.("OPS_POLICY_RECONCILE_INTERVAL_MS", 30_000),
+  reconcile_jitter_ms: parse_non_negative_integer_env.("OPS_POLICY_RECONCILE_JITTER_MS", 5_000),
+  reconcile_failure_threshold:
+    parse_positive_integer_env.("OPS_POLICY_RECONCILE_FAILURE_THRESHOLD", 3),
+  telemetry_enabled: parse_boolean_env.("OPS_POLICY_TELEMETRY_ENABLED", true),
+  default_policies: %{
+    {"default", "prod", "dispatch", "acl_default"} => default_acl_policy
+  }
 
 # 钉钉机器人回发配置（生产可直接由环境变量驱动）。
 dingtalk_webhook_url = System.get_env("DINGTALK_ROBOT_WEBHOOK_URL")
