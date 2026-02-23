@@ -67,20 +67,24 @@ defmodule Men.Gateway.ActionExecutor do
   end
 
   defp build_failed_receipt(action, context, error_info) do
-    code = Map.get(error_info, :code) || Map.get(error_info, "code") || "ACTION_FAILED"
+    normalized_error_info = normalize_error_info(error_info)
+
+    code =
+      Map.get(normalized_error_info, :code) || Map.get(normalized_error_info, "code") ||
+        "ACTION_FAILED"
 
     message =
-      Map.get(error_info, :message) ||
-        Map.get(error_info, "message") ||
+      Map.get(normalized_error_info, :message) ||
+        Map.get(normalized_error_info, "message") ||
         "action execution failed"
 
     retryable =
-      Map.get(error_info, :retryable) ||
-        Map.get(error_info, "retryable") ||
+      Map.get(normalized_error_info, :retryable) ||
+        Map.get(normalized_error_info, "retryable") ||
         false
 
     data =
-      error_info
+      normalized_error_info
       |> normalize_data()
       |> Map.drop([:message, "message", :code, "code", :retryable, "retryable"])
 
@@ -95,6 +99,9 @@ defmodule Men.Gateway.ActionExecutor do
       ts: now_ms()
     })
   end
+
+  defp normalize_error_info(%{} = error_info), do: error_info
+  defp normalize_error_info(error_info), do: %{message: inspect(error_info), reason: error_info}
 
   defp default_dispatcher(action, context, _opts) do
     payload = %{
