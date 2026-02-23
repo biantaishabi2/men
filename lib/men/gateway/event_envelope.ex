@@ -1,17 +1,15 @@
 defmodule Men.Gateway.EventEnvelope do
   @moduledoc """
-  统一事件信封：将外部输入归一化为可判定、可追踪的内部结构。
+  统一事件信封：校验必填字段并规范化轻量事件载荷。
   """
 
   @enforce_keys [
     :type,
     :source,
-    :target,
+    :session_key,
     :event_id,
     :version,
     :ets_keys,
-    :wake,
-    :inbox_only,
     :payload,
     :ts,
     :meta
@@ -20,11 +18,11 @@ defmodule Men.Gateway.EventEnvelope do
     :type,
     :source,
     :target,
+    :session_key,
     :event_id,
     :version,
     :wake,
     :inbox_only,
-    :force_wake,
     :ets_keys,
     :payload,
     :ts,
@@ -34,44 +32,51 @@ defmodule Men.Gateway.EventEnvelope do
   @type t :: %__MODULE__{
           type: String.t(),
           source: String.t(),
-          target: String.t(),
+          target: String.t() | nil,
+          session_key: String.t(),
           event_id: String.t(),
           version: non_neg_integer(),
           wake: boolean() | nil,
           inbox_only: boolean() | nil,
-          force_wake: boolean(),
           ets_keys: [String.t()],
-          payload: term(),
+          payload: map(),
           ts: integer(),
           meta: map()
         }
 
-  @spec from_map(map()) :: {:ok, t()} | {:error, term()}
-  def from_map(%{} = attrs) do
+  @spec normalize(map() | t()) :: {:ok, t()} | {:error, term()}
+  def normalize(%__MODULE__{} = envelope) do
+    envelope
+    |> Map.from_struct()
+    |> normalize()
+  end
+
+  def normalize(%{} = attrs) do
     with {:ok, normalized} <- stringify_keys(attrs),
          {:ok, type} <- fetch_required_text(normalized, "type"),
-         {:ok, source} <- fetch_text(normalized, "source", "unknown"),
-         {:ok, target} <- fetch_text(normalized, "target", "unknown"),
+         {:ok, source} <- fetch_required_text(normalized, "source"),
+         {:ok, session_key} <- fetch_required_text(normalized, "session_key"),
          {:ok, event_id} <- fetch_required_text(normalized, "event_id"),
-         {:ok, version} <- fetch_version(normalized["version"]),
-         {:ok, wake} <- fetch_optional_boolean(normalized["wake"], :wake),
-         {:ok, inbox_only} <- fetch_optional_boolean(normalized["inbox_only"], :inbox_only),
-         {:ok, force_wake} <- fetch_boolean(normalized["force_wake"], false, :force_wake),
-         {:ok, ets_keys} <- fetch_ets_keys(normalized["ets_keys"], type, source, target),
-         {:ok, ts} <- fetch_timestamp(normalized["ts"]),
-         {:ok, meta} <- fetch_meta(normalized["meta"]) do
-      payload = Map.get(normalized, "payload", %{})
-
+         {:ok, version} <- fetch_version(Map.get(normalized, "version")),
+         {:ok, ets_keys} <-
+           fetch_ets_keys(Map.get(normalized, "ets_keys"), type, source, session_key, event_id),
+         {:ok, payload} <- fetch_payload(Map.get(normalized, "payload", %{})),
+         {:ok, wake} <- fetch_optional_boolean(Map.get(normalized, "wake"), :wake),
+         {:ok, inbox_only} <-
+           fetch_optional_boolean(Map.get(normalized, "inbox_only"), :inbox_only),
+         {:ok, target} <- fetch_optional_text(Map.get(normalized, "target")),
+         {:ok, ts} <- fetch_timestamp(Map.get(normalized, "ts")),
+         {:ok, meta} <- fetch_meta(Map.get(normalized, "meta")) do
       {:ok,
        %__MODULE__{
          type: type,
          source: source,
          target: target,
+         session_key: session_key,
          event_id: event_id,
          version: version,
          wake: wake,
          inbox_only: inbox_only,
-         force_wake: force_wake,
          ets_keys: ets_keys,
          payload: payload,
          ts: ts,
@@ -80,34 +85,19 @@ defmodule Men.Gateway.EventEnvelope do
     end
   end
 
-  def from_map(_), do: {:error, :invalid_event_envelope}
-
-  @spec normalize(map() | t()) :: {:ok, t()} | {:error, term()}
-  def normalize(%__MODULE__{} = envelope) do
-    envelope
-    |> Map.from_struct()
-    |> from_map()
-  end
-
-  def normalize(%{} = attrs), do: from_map(attrs)
   def normalize(_), do: {:error, :invalid_event_envelope}
 
   defp stringify_keys(map) do
     Enum.reduce_while(map, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
       case normalize_key(key) do
-        {:ok, normalized_key} ->
-          {:cont, {:ok, Map.put(acc, normalized_key, value)}}
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
+        {:ok, k} -> {:cont, {:ok, Map.put(acc, k, value)}}
+        {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
   end
 
   defp normalize_key(key) when is_atom(key), do: {:ok, Atom.to_string(key)}
   defp normalize_key(key) when is_binary(key), do: {:ok, key}
-  defp normalize_key(key) when is_integer(key), do: {:ok, Integer.to_string(key)}
-  defp normalize_key(key) when is_float(key), do: {:ok, :erlang.float_to_binary(key)}
   defp normalize_key(_), do: {:error, {:invalid_field, :key}}
 
   defp fetch_required_text(map, key) do
@@ -123,61 +113,39 @@ defmodule Men.Gateway.EventEnvelope do
           else: {:ok, trimmed}
 
       value when is_atom(value) ->
-        atom_text = value |> Atom.to_string() |> String.trim()
-
-        if atom_text == "",
-          do: {:error, {:invalid_field, String.to_atom(key)}},
-          else: {:ok, atom_text}
+        fetch_required_text(%{key => Atom.to_string(value)}, key)
 
       _ ->
         {:error, {:invalid_field, String.to_atom(key)}}
     end
   end
 
-  defp fetch_text(map, key, default) do
-    case Map.get(map, key, default) do
-      value when is_binary(value) ->
-        trimmed = String.trim(value)
-        if trimmed == "", do: {:ok, default}, else: {:ok, trimmed}
+  defp fetch_optional_text(nil), do: {:ok, nil}
 
-      value when is_atom(value) ->
-        atom_text = value |> Atom.to_string() |> String.trim()
-
-        if atom_text == "", do: {:ok, default}, else: {:ok, atom_text}
-
-      nil ->
-        {:ok, default}
-
-      _ ->
-        {:error, {:invalid_field, String.to_atom(key)}}
-    end
+  defp fetch_optional_text(value) when is_binary(value) do
+    trimmed = String.trim(value)
+    if trimmed == "", do: {:ok, nil}, else: {:ok, trimmed}
   end
 
-  defp fetch_version(value) when is_integer(value) and value >= 0, do: {:ok, value}
+  defp fetch_optional_text(_), do: {:error, {:invalid_field, :target}}
+
   defp fetch_version(nil), do: {:ok, 0}
+  defp fetch_version(value) when is_integer(value) and value >= 0, do: {:ok, value}
   defp fetch_version(_), do: {:error, {:invalid_field, :version}}
 
-  defp fetch_optional_boolean(nil, _field), do: {:ok, nil}
-  defp fetch_optional_boolean(value, _field) when is_boolean(value), do: {:ok, value}
-  defp fetch_optional_boolean(_, field), do: {:error, {:invalid_field, field}}
+  defp fetch_ets_keys(nil, type, source, session_key, event_id),
+    do: {:ok, [type, source, session_key, event_id]}
 
-  defp fetch_boolean(nil, default, _field), do: {:ok, default}
-  defp fetch_boolean(value, _default, _field) when is_boolean(value), do: {:ok, value}
-  defp fetch_boolean(_, _default, field), do: {:error, {:invalid_field, field}}
-
-  # ets_keys 为空时回落到 type/source/target，确保后续版本守卫有稳定作用域。
-  defp fetch_ets_keys(nil, type, source, target), do: {:ok, [type, source, target]}
-
-  defp fetch_ets_keys(value, _type, _source, _target) when is_list(value) do
-    keys =
-      value
+  defp fetch_ets_keys(keys, _type, _source, _session_key, _event_id) when is_list(keys) do
+    normalized =
+      keys
       |> Enum.map(&normalize_ets_key/1)
       |> Enum.reject(&is_nil/1)
 
-    if keys == [], do: {:error, {:invalid_field, :ets_keys}}, else: {:ok, keys}
+    if normalized == [], do: {:error, {:invalid_field, :ets_keys}}, else: {:ok, normalized}
   end
 
-  defp fetch_ets_keys(_, _, _, _), do: {:error, {:invalid_field, :ets_keys}}
+  defp fetch_ets_keys(_, _, _, _, _), do: {:error, {:invalid_field, :ets_keys}}
 
   defp normalize_ets_key(value) when is_binary(value) do
     trimmed = String.trim(value)
@@ -188,11 +156,18 @@ defmodule Men.Gateway.EventEnvelope do
   defp normalize_ets_key(value) when is_integer(value), do: Integer.to_string(value)
   defp normalize_ets_key(_), do: nil
 
-  defp fetch_timestamp(value) when is_integer(value), do: {:ok, value}
+  defp fetch_payload(payload) when is_map(payload), do: {:ok, payload}
+  defp fetch_payload(_), do: {:error, {:invalid_field, :payload}}
+
+  defp fetch_optional_boolean(nil, _field), do: {:ok, nil}
+  defp fetch_optional_boolean(value, _field) when is_boolean(value), do: {:ok, value}
+  defp fetch_optional_boolean(_, field), do: {:error, {:invalid_field, field}}
+
   defp fetch_timestamp(nil), do: {:ok, System.system_time(:millisecond)}
+  defp fetch_timestamp(value) when is_integer(value), do: {:ok, value}
   defp fetch_timestamp(_), do: {:error, {:invalid_field, :ts}}
 
   defp fetch_meta(nil), do: {:ok, %{}}
-  defp fetch_meta(%{} = meta), do: {:ok, meta}
+  defp fetch_meta(value) when is_map(value), do: {:ok, value}
   defp fetch_meta(_), do: {:error, {:invalid_field, :meta}}
 end

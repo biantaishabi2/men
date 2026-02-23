@@ -95,15 +95,38 @@ config :men, Men.Gateway.SessionCoordinator,
       [:runtime_session_not_found]
     )
 
-default_acl_policy =
-  case System.get_env("OPS_POLICY_DEFAULT_ACL_JSON") do
+default_gateway_policy =
+  case System.get_env("GATEWAY_BOOTSTRAP_POLICY_JSON") do
     nil ->
-      %{"mode" => "deny_all", "allow" => []}
+      %{
+        "acl" => %{
+          "main" => %{
+            "read" => ["global.", "agent.", "shared.", "inbox."],
+            "write" => ["global.control.", "inbox."]
+          },
+          "child" => %{
+            "read" => ["agent.$agent_id.", "shared.evidence.agent.$agent_id.", "inbox."],
+            "write" => ["agent.$agent_id.", "shared.evidence.agent.$agent_id.", "inbox."]
+          },
+          "tool" => %{
+            "read" => ["agent.$agent_id.", "shared.evidence.agent.$agent_id.", "inbox."],
+            "write" => ["inbox."]
+          },
+          "system" => %{"read" => [""], "write" => [""]}
+        },
+        "wake" => %{
+          "must_wake" => ["agent_result", "agent_error", "policy_changed"],
+          "inbox_only" => ["heartbeat", "tool_progress", "telemetry"]
+        },
+        "dedup_ttl_ms" => 60_000,
+        "version" => 0,
+        "policy_version" => "fallback"
+      }
 
     raw ->
       case Jason.decode(raw) do
         {:ok, value} when is_map(value) -> value
-        _ -> %{"mode" => "deny_all", "allow" => []}
+        _ -> %{}
       end
   end
 
@@ -115,8 +138,12 @@ config :men, :ops_policy,
     parse_positive_integer_env.("OPS_POLICY_RECONCILE_FAILURE_THRESHOLD", 3),
   telemetry_enabled: parse_boolean_env.("OPS_POLICY_TELEMETRY_ENABLED", true),
   default_policies: %{
-    {"default", "prod", "dispatch", "acl_default"} => default_acl_policy
+    {"default", "prod", "gateway", "gateway_runtime"} => default_gateway_policy
   }
+
+config :men, Men.Gateway.OpsPolicyProvider,
+  cache_ttl_ms: parse_positive_integer_env.("GATEWAY_POLICY_CACHE_TTL_MS", 300_000),
+  bootstrap_policy: default_gateway_policy
 
 # 钉钉机器人回发配置（生产可直接由环境变量驱动）。
 dingtalk_webhook_url = System.get_env("DINGTALK_ROBOT_WEBHOOK_URL")

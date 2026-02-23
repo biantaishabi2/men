@@ -57,12 +57,14 @@ defmodule Men.Gateway.InboxStoreTest do
       EventEnvelope.normalize(%{
         type: "agent_result",
         source: "agent",
+        session_key: "s1",
         target: "control",
         event_id: event_id,
         version: version,
         wake: true,
         inbox_only: false,
-        ets_keys: ets_keys
+        ets_keys: ets_keys,
+        payload: %{result: "ok"}
       })
 
     envelope
