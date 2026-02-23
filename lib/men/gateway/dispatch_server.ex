@@ -8,9 +8,13 @@ defmodule Men.Gateway.DispatchServer do
   require Logger
 
   alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
+  alias Men.Gateway.ActionExecutor
   alias Men.Gateway.EventEnvelope
+  alias Men.Gateway.FrameBuilder
   alias Men.Gateway.InboxStore
   alias Men.Gateway.OpsPolicyProvider
+  alias Men.Gateway.PromptComposer
+  alias Men.Gateway.Receipt
   alias Men.Gateway.ReplStore
   alias Men.Gateway.Runtime.Adapter
   alias Men.Gateway.Runtime.ModeStateMachine
@@ -48,6 +52,17 @@ defmodule Men.Gateway.DispatchServer do
           mode_transition_recovery_ticks: non_neg_integer(),
           runtime_adapter: module(),
           jit_feature_flag: Adapter.jit_flag(),
+          agent_loop_enabled: boolean(),
+          prompt_frame_injection_enabled: boolean(),
+          frame_budget_tokens: pos_integer(),
+          frame_budget_messages: pos_integer(),
+          receipt_recent_limit: pos_integer(),
+          prompt_composer: module(),
+          action_executor: module(),
+          action_dispatcher: function() | nil,
+          event_bus_topic: binary(),
+          pending_actions_by_session: %{optional(binary()) => [map()]},
+          recent_receipts_by_session: %{optional(binary()) => [map()]},
           run_terminal_limit: pos_integer(),
           run_terminal_order: :queue.queue(binary()),
           session_last_context: %{optional(binary()) => Types.run_context()},
@@ -87,6 +102,12 @@ defmodule Men.Gateway.DispatchServer do
           | {:error, term()}
   def coordinate_event(server \\ __MODULE__, event, runtime_overrides \\ %{}) do
     GenServer.call(server, {:coordinate_event, event, runtime_overrides})
+  end
+
+  @spec push_receipt(GenServer.server(), map(), keyword()) ::
+          {:ok, %{receipt: Receipt.t(), status: :stored | :duplicate}} | {:error, term()}
+  def push_receipt(server \\ __MODULE__, receipt_attrs, opts \\ []) do
+    GenServer.call(server, {:push_receipt, receipt_attrs, opts})
   end
 
   @spec enqueue(GenServer.server(), Types.inbound_event()) ::
@@ -221,6 +242,38 @@ defmodule Men.Gateway.DispatchServer do
         Keyword.get(opts, :runtime_adapter, Keyword.get(config, :runtime_adapter, Adapter)),
       jit_feature_flag:
         Keyword.get(opts, :jit_feature_flag, Keyword.get(config, :jit_feature_flag, :jit_enabled)),
+      agent_loop_enabled:
+        Keyword.get(opts, :agent_loop_enabled, Keyword.get(config, :agent_loop_enabled, true)),
+      prompt_frame_injection_enabled:
+        Keyword.get(
+          opts,
+          :prompt_frame_injection_enabled,
+          Keyword.get(config, :prompt_frame_injection_enabled, false)
+        ),
+      frame_budget_tokens:
+        Keyword.get(opts, :frame_budget_tokens, Keyword.get(config, :frame_budget_tokens, 16_000)),
+      frame_budget_messages:
+        Keyword.get(
+          opts,
+          :frame_budget_messages,
+          Keyword.get(config, :frame_budget_messages, 20)
+        ),
+      receipt_recent_limit:
+        Keyword.get(opts, :receipt_recent_limit, Keyword.get(config, :receipt_recent_limit, 20)),
+      prompt_composer:
+        Keyword.get(opts, :prompt_composer, Keyword.get(config, :prompt_composer, PromptComposer)),
+      action_executor:
+        Keyword.get(opts, :action_executor, Keyword.get(config, :action_executor, ActionExecutor)),
+      action_dispatcher:
+        Keyword.get(opts, :action_dispatcher, Keyword.get(config, :action_dispatcher)),
+      event_bus_topic:
+        Keyword.get(
+          opts,
+          :event_bus_topic,
+          Keyword.get(config, :event_bus_topic, "gateway_events")
+        ),
+      pending_actions_by_session: %{},
+      recent_receipts_by_session: %{},
       run_terminal_limit:
         Keyword.get(opts, :run_terminal_limit, Keyword.get(config, :run_terminal_limit, 1_000)),
       run_terminal_order: :queue.new(),
@@ -239,6 +292,16 @@ defmodule Men.Gateway.DispatchServer do
 
   def handle_call({:coordinate_event, inbound_event, runtime_overrides}, _from, state) do
     {:reply, run_event_coordination(state, inbound_event, runtime_overrides), state}
+  end
+
+  def handle_call({:push_receipt, receipt_attrs, opts}, _from, state) do
+    case do_record_receipt(state, receipt_attrs, opts) do
+      {:ok, receipt, store_status, next_state} ->
+        {:reply, {:ok, %{receipt: receipt, status: store_status}}, next_state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   @impl true
@@ -727,11 +790,13 @@ defmodule Men.Gateway.DispatchServer do
 
     case do_start_turn(state, context) do
       {:ok, bridge_payload, run_context} ->
-        case do_send_final(state, context, run_context, bridge_payload) do
+        {next_state, bridge_payload} = maybe_run_actions(state, context, bridge_payload)
+
+        case do_send_final(next_state, context, run_context, bridge_payload) do
           :ok ->
             dispatch_result = build_dispatch_result(context, bridge_payload)
             reply = {:ok, dispatch_result}
-            new_state = mark_terminal(state, context, run_context, reply)
+            new_state = mark_terminal(next_state, context, run_context, reply)
             log_transition(:run_completed, context, run_context)
             {reply, new_state}
 
@@ -746,7 +811,10 @@ defmodule Men.Gateway.DispatchServer do
             error_payload = ensure_error_egress_result(state, context, error_payload)
             error_result = build_error_result(context, error_payload)
             reply = {:error, error_result}
-            new_state = maybe_mark_terminal(state, context, run_context, reply, error_payload)
+
+            new_state =
+              maybe_mark_terminal(next_state, context, run_context, reply, error_payload)
+
             log_failed(context, run_context, error_payload)
             {reply, new_state}
         end
@@ -849,17 +917,57 @@ defmodule Men.Gateway.DispatchServer do
     end
   end
 
+  defp maybe_build_agent_frame(%{agent_loop_enabled: false}, _context), do: {:ok, %{}}
+
+  defp maybe_build_agent_frame(state, context) do
+    shared_state = %{
+      inbox: build_frame_inbox(context),
+      pending_actions: Map.get(state.pending_actions_by_session, context.session_key, []),
+      budget: %{tokens: state.frame_budget_tokens, messages: state.frame_budget_messages},
+      recent_receipts: Map.get(state.recent_receipts_by_session, context.session_key, [])
+    }
+
+    {:ok, FrameBuilder.build_agent_loop_frame(shared_state)}
+  end
+
+  defp maybe_compose_prompt(%{agent_loop_enabled: false}, prompt, _frame), do: {:ok, prompt}
+
+  defp maybe_compose_prompt(state, prompt, frame) do
+    composed =
+      state.prompt_composer.compose(prompt, frame, inject?: state.prompt_frame_injection_enabled)
+
+    {:ok, Map.get(composed, :prompt, prompt)}
+  end
+
+  defp build_frame_inbox(context) do
+    case context.payload do
+      %{} = payload ->
+        messages = Map.get(payload, :messages) || Map.get(payload, "messages") || []
+
+        if is_list(messages) do
+          messages
+        else
+          [%{payload: payload}]
+        end
+
+      payload ->
+        [%{payload: payload}]
+    end
+  end
+
   defp do_start_turn(state, context) do
     with {:ok, prompt} <- payload_to_prompt(context.payload),
+         {:ok, frame} <- maybe_build_agent_frame(state, context),
+         {:ok, composed_prompt} <- maybe_compose_prompt(state, prompt, frame),
          {:ok, run_context} <-
            resolve_runtime_context(state, context.session_key, context.run_id, 1),
          {:ok, run_context} <- enrich_runtime_context(state, context, run_context) do
-      case call_bridge(state, prompt, context, run_context) do
+      case call_bridge(state, composed_prompt, context, run_context) do
         {:ok, payload} ->
           {:ok, payload, run_context}
 
         {:error, error_payload} ->
-          maybe_retry_start_turn(state, context, prompt, run_context, error_payload)
+          maybe_retry_start_turn(state, context, composed_prompt, run_context, error_payload)
       end
     else
       {:error, {:invalid_payload, reason}} ->
@@ -1107,6 +1215,158 @@ defmodule Men.Gateway.DispatchServer do
     state.egress_adapter.send(context.session_key, message)
   end
 
+  # Action 仅来源于主 Agent 推理输出（bridge_payload.actions），不允许外部直调触发。
+  defp maybe_run_actions(%{agent_loop_enabled: false} = state, _context, bridge_payload),
+    do: {state, bridge_payload}
+
+  defp maybe_run_actions(state, context, bridge_payload) do
+    actions = extract_actions(bridge_payload)
+
+    if actions == [] do
+      {state, bridge_payload}
+    else
+      next_state =
+        state
+        |> put_pending_actions(context.session_key, context.run_id, actions)
+        |> execute_actions(context, actions)
+
+      receipts = Map.get(next_state.recent_receipts_by_session, context.session_key, [])
+
+      updated_payload =
+        Map.update(bridge_payload, :meta, %{action_receipts: receipts}, fn meta ->
+          Map.put(meta, :action_receipts, receipts)
+        end)
+
+      {next_state, updated_payload}
+    end
+  end
+
+  defp execute_actions(state, context, actions) do
+    executor_opts =
+      case state.action_dispatcher do
+        dispatcher when is_function(dispatcher, 3) -> [dispatcher: dispatcher]
+        _ -> []
+      end
+
+    receipts =
+      state.action_executor.execute_all(actions, context, executor_opts)
+
+    Enum.reduce(receipts, state, fn receipt, acc ->
+      case Receipt.record(receipt,
+             session_key: context.session_key,
+             repl_store_opts: acc.repl_store_opts,
+             event_topic: acc.event_bus_topic
+           ) do
+        {:ok, store_status} ->
+          acc
+          |> put_recent_receipt(context.session_key, receipt)
+          |> ack_pending_action(context.session_key, receipt)
+          |> emit_receipt_telemetry(context, receipt, store_status)
+
+        {:error, reason} ->
+          Logger.warning(
+            "gateway.dispatch receipt record failed run_id=#{context.run_id} " <>
+              "action_id=#{receipt.action_id} reason=#{inspect(reason)}"
+          )
+
+          acc
+      end
+    end)
+  end
+
+  defp emit_receipt_telemetry(state, context, receipt, store_status) do
+    emit_telemetry([:dispatch, :action_receipt], %{
+      run_id: context.run_id,
+      session_key: context.session_key,
+      action_id: receipt.action_id,
+      status: receipt.status,
+      retryable: receipt.retryable,
+      store_status: store_status
+    })
+
+    state
+  end
+
+  defp extract_actions(%{} = bridge_payload) do
+    actions =
+      Map.get(bridge_payload, :actions) ||
+        Map.get(bridge_payload, "actions") ||
+        []
+
+    List.wrap(actions)
+  end
+
+  defp extract_actions(_), do: []
+
+  defp put_pending_actions(state, session_key, run_id, actions) do
+    normalized = Enum.map(actions, &normalize_pending_action(&1, run_id))
+    existing = Map.get(state.pending_actions_by_session, session_key, [])
+    merged = merge_pending_actions(existing, normalized)
+    Map.update!(state, :pending_actions_by_session, &Map.put(&1, session_key, merged))
+  end
+
+  defp merge_pending_actions(existing, incoming) do
+    incoming_keys = incoming |> Enum.map(&pending_action_key/1) |> MapSet.new()
+    preserved = Enum.reject(existing, &MapSet.member?(incoming_keys, pending_action_key(&1)))
+    preserved ++ incoming
+  end
+
+  defp ack_pending_action(state, session_key, receipt) do
+    pending = Map.get(state.pending_actions_by_session, session_key, [])
+    receipt_key = {receipt.run_id, receipt.action_id}
+
+    next_pending =
+      if receipt.status == :ok or receipt.retryable == false do
+        Enum.reject(pending, fn item -> pending_action_key(item) == receipt_key end)
+      else
+        pending
+      end
+
+    Map.update!(state, :pending_actions_by_session, &Map.put(&1, session_key, next_pending))
+  end
+
+  defp put_recent_receipt(state, session_key, receipt) do
+    normalized_receipt = normalize_receipt_map(receipt)
+
+    receipts =
+      state.recent_receipts_by_session
+      |> Map.get(session_key, [])
+      |> prepend_unique_receipt(normalized_receipt)
+      |> Enum.take(state.receipt_recent_limit)
+
+    Map.update!(state, :recent_receipts_by_session, &Map.put(&1, session_key, receipts))
+  end
+
+  defp prepend_unique_receipt(receipts, receipt) do
+    dedup_key = {Map.get(receipt, :run_id), Map.get(receipt, :action_id)}
+
+    trimmed =
+      Enum.reject(receipts, fn item ->
+        {Map.get(item, :run_id), Map.get(item, :action_id)} == dedup_key
+      end)
+
+    [receipt | trimmed]
+  end
+
+  defp normalize_receipt_map(%Receipt{} = receipt), do: Map.from_struct(receipt)
+  defp normalize_receipt_map(%{} = receipt), do: receipt
+
+  defp normalize_pending_action(action, run_id) do
+    %{
+      run_id: run_id,
+      action_id: Map.get(action, :action_id) || Map.get(action, "action_id") || "unknown_action",
+      name: Map.get(action, :name) || Map.get(action, "name") || "unknown",
+      params: Map.get(action, :params) || Map.get(action, "params") || %{}
+    }
+  end
+
+  defp pending_action_key(action) do
+    {
+      Map.get(action, :run_id) || Map.get(action, "run_id"),
+      Map.get(action, :action_id) || Map.get(action, "action_id")
+    }
+  end
+
   defp build_jit_metadata(%{jit_result: jit_result}) when is_map(jit_result) do
     %{
       jit_flag_state: Map.get(jit_result, :flag_state),
@@ -1263,5 +1523,31 @@ defmodule Men.Gateway.DispatchServer do
       payload: nil,
       metadata: %{}
     }
+  end
+
+  defp do_record_receipt(state, receipt_attrs, opts) do
+    session_key =
+      Keyword.get(opts, :session_key) ||
+        Map.get(receipt_attrs, :session_key) ||
+        Map.get(receipt_attrs, "session_key") ||
+        "global"
+
+    with {:ok, receipt} <- Receipt.safe_new(receipt_attrs),
+         {:ok, store_status} <-
+           Receipt.record(receipt,
+             session_key: session_key,
+             repl_store_opts: state.repl_store_opts,
+             event_topic: state.event_bus_topic
+           ) do
+      next_state =
+        state
+        |> put_recent_receipt(session_key, receipt)
+        |> ack_pending_action(session_key, receipt)
+
+      {:ok, receipt, store_status, next_state}
+    else
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 end

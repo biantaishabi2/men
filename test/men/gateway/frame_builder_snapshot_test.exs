@@ -97,4 +97,19 @@ defmodule Men.Gateway.FrameBuilderSnapshotTest do
     assert frame.sections.recommendations == [%{text: "standby", priority: :normal}]
     assert frame.sections.next_candidates == []
   end
+
+  test "agent loop frame 默认预算与裁剪生效" do
+    frame =
+      FrameBuilder.build_agent_loop_frame(%{
+        inbox: Enum.map(1..30, &%{id: &1}),
+        pending_actions: [%{action_id: "a1"}],
+        recent_receipts: [%{receipt_id: "r1"}]
+      })
+
+    assert frame.budget.tokens == 16_000
+    assert frame.budget.messages == 20
+    assert length(frame.inbox) == 20
+    assert frame.pending_actions == [%{action_id: "a1"}]
+    assert frame.recent_receipts == [%{receipt_id: "r1"}]
+  end
 end

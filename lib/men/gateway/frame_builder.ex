@@ -35,6 +35,13 @@ defmodule Men.Gateway.FrameBuilder do
           sections: %{optional(section()) => term()}
         }
 
+  @type agent_loop_frame :: %{
+          inbox: [map()],
+          pending_actions: [map()],
+          budget: %{tokens: pos_integer(), messages: pos_integer()},
+          recent_receipts: [map()]
+        }
+
   @spec build(map(), keyword()) :: t()
   def build(runtime_state, opts \\ []) when is_map(runtime_state) and is_list(opts) do
     snapshot_type = Keyword.get(opts, :snapshot_type, :action_snapshot)
@@ -56,6 +63,43 @@ defmodule Men.Gateway.FrameBuilder do
       snapshot_type: snapshot.snapshot_type,
       snapshot: snapshot,
       sections: frame_sections
+    }
+  end
+
+  @spec build_agent_loop_frame(map(), keyword()) :: agent_loop_frame()
+  def build_agent_loop_frame(shared_state, opts \\ [])
+      when is_map(shared_state) and is_list(opts) do
+    budget =
+      normalize_budget(
+        Map.get(shared_state, :budget, %{}),
+        Keyword.get(opts, :budget, %{})
+      )
+
+    trim_fun = Keyword.get(opts, :trimmer, &default_trim/2)
+
+    inbox =
+      shared_state
+      |> Map.get(:inbox, [])
+      |> List.wrap()
+      |> trim_fun.({:inbox, budget})
+
+    pending_actions =
+      shared_state
+      |> Map.get(:pending_actions, [])
+      |> List.wrap()
+      |> trim_fun.({:pending_actions, budget})
+
+    recent_receipts =
+      shared_state
+      |> Map.get(:recent_receipts, [])
+      |> List.wrap()
+      |> trim_fun.({:recent_receipts, budget})
+
+    %{
+      inbox: inbox,
+      pending_actions: pending_actions,
+      budget: budget,
+      recent_receipts: recent_receipts
     }
   end
 
@@ -151,4 +195,33 @@ defmodule Men.Gateway.FrameBuilder do
 
   defp default_section_value(section) when section in @list_sections, do: []
   defp default_section_value(_section), do: nil
+
+  defp normalize_budget(state_budget, override_budget) do
+    merged =
+      state_budget
+      |> normalize_budget_map()
+      |> Map.merge(normalize_budget_map(override_budget))
+
+    %{
+      tokens: Map.get(merged, :tokens, 16_000),
+      messages: Map.get(merged, :messages, 20)
+    }
+  end
+
+  defp normalize_budget_map(%{} = budget) do
+    %{
+      tokens: positive_integer(Map.get(budget, :tokens) || Map.get(budget, "tokens"), 16_000),
+      messages: positive_integer(Map.get(budget, :messages) || Map.get(budget, "messages"), 20)
+    }
+  end
+
+  defp normalize_budget_map(_), do: %{}
+
+  # 预算裁剪默认按消息条数截断，调用方可通过 trimmer 覆盖策略。
+  defp default_trim(items, {_section, budget}) do
+    Enum.take(items, budget.messages)
+  end
+
+  defp positive_integer(value, _fallback) when is_integer(value) and value > 0, do: value
+  defp positive_integer(_value, fallback), do: fallback
 end

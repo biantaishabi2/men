@@ -145,6 +145,15 @@ config :men, Men.Gateway.OpsPolicyProvider,
   cache_ttl_ms: parse_positive_integer_env.("GATEWAY_POLICY_CACHE_TTL_MS", 300_000),
   bootstrap_policy: default_gateway_policy
 
+config :men, Men.Gateway.DispatchServer,
+  agent_loop_enabled: parse_boolean_env.("GATEWAY_AGENT_LOOP_ENABLED", true),
+  prompt_frame_injection_enabled:
+    parse_boolean_env.("GATEWAY_PROMPT_FRAME_INJECTION_ENABLED", false),
+  frame_budget_tokens: parse_positive_integer_env.("GATEWAY_FRAME_BUDGET_TOKENS", 16_000),
+  frame_budget_messages: parse_positive_integer_env.("GATEWAY_FRAME_BUDGET_MESSAGES", 20),
+  receipt_recent_limit: parse_positive_integer_env.("GATEWAY_RECEIPT_RECENT_LIMIT", 20),
+  event_bus_topic: System.get_env("GATEWAY_EVENT_BUS_TOPIC") || "gateway_events"
+
 # 钉钉机器人回发配置（生产可直接由环境变量驱动）。
 dingtalk_webhook_url = System.get_env("DINGTALK_ROBOT_WEBHOOK_URL")
 
