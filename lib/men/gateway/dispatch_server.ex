@@ -444,7 +444,7 @@ defmodule Men.Gateway.DispatchServer do
         %{
           role: :tool,
           tool_id: tool_id,
-          agent_id: Map.get(envelope.meta, :agent_id) || "unknown_agent",
+          agent_id: Map.get(envelope.meta, :agent_id),
           session_key: envelope.session_key
         }
 

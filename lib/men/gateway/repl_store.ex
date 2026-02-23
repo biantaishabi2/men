@@ -103,9 +103,13 @@ defmodule Men.Gateway.ReplStore do
         {:ok, %{status: :duplicate, duplicate: true}}
       else
         outcome = apply_version_guard(scope_table, envelope)
-        :ets.insert(inbox_table, {dedup_key(envelope), envelope})
+        accepted = outcome != :older_drop
 
-        log_inbox_result(context, true, false, outcome, Atom.to_string(outcome))
+        if accepted do
+          :ets.insert(inbox_table, {dedup_key(envelope), envelope})
+        end
+
+        log_inbox_result(context, accepted, false, outcome, Atom.to_string(outcome))
 
         {:ok,
          %{

@@ -61,6 +61,9 @@ defmodule Men.Gateway.ReplStoreTest do
 
     assert {:ok, %{status: :older_drop}} =
              ReplStore.put_inbox(envelope!("e2-old", 2), @policy, opts)
+
+    dedup_key = {"agent.agent_a", "s1", "e2-old"}
+    refute :ets.member(opts[:inbox_table], dedup_key)
   end
 
   test "put/get/list/query 走 ACL 并支持查询", %{opts: opts} do

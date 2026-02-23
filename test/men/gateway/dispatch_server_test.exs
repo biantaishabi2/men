@@ -719,5 +719,24 @@ defmodule Men.Gateway.DispatchServerTest do
       assert_receive {:frame_rebuild_triggered, _}
       refute_receive {:frame_rebuild_triggered, _}
     end
+
+    test "tool 事件缺失 agent_id 时 fail-closed 拒绝入箱" do
+      server = start_event_coord_server()
+
+      event = %{
+        type: "tool_progress",
+        source: "tool.t1",
+        session_key: "s1",
+        target: "control",
+        event_id: "E6",
+        version: 1,
+        ets_keys: ["agent.agent_a", "tool.t1"],
+        payload: %{progress: 80},
+        meta: %{}
+      }
+
+      assert {:error, :acl_denied} = DispatchServer.coordinate_event(server, event)
+      refute_receive {:frame_rebuild_triggered, _}
+    end
   end
 end

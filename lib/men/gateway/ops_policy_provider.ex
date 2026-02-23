@@ -51,13 +51,8 @@ defmodule Men.Gateway.OpsPolicyProvider do
 
       {:error, reason} ->
         fallback = fallback_policy(options, reason)
-
-        if cached != :miss do
-          {:ok, cached}
-        else
-          write_cache(fallback, options)
-          {:ok, fallback}
-        end
+        write_cache(fallback, options)
+        {:ok, fallback}
     end
   end
 
