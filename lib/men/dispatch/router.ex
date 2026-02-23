@@ -6,6 +6,7 @@ defmodule Men.Dispatch.Router do
   require Logger
 
   alias Men.Dispatch.CircuitBreaker
+  alias Men.Gateway.SessionCoordinator
 
   @type route_result ::
           {:ok, %{text: binary(), meta: map()}, map()} | {:error, map(), map()} | {:ignore, map()}
@@ -43,7 +44,9 @@ defmodule Men.Dispatch.Router do
   defp execute_legacy(state, context, prompt) do
     case state.legacy_bridge_adapter.start_turn(prompt, bridge_context(context, state)) do
       {:ok, payload} -> {:ok, payload, state}
-      {:error, error_payload} -> {:error, error_payload, state}
+      {:error, error_payload} ->
+        state = maybe_invalidate_runtime_session(state, context, error_payload)
+        {:error, error_payload, state}
     end
   end
 
@@ -72,6 +75,7 @@ defmodule Men.Dispatch.Router do
           {:error, error_payload} ->
             breaker_after_failure = CircuitBreaker.record_failure(state.zcpg_breaker)
             state = %{state | zcpg_breaker: breaker_after_failure}
+            state = maybe_invalidate_runtime_session(state, context, error_payload)
 
             if fallback_required?(error_payload) do
               Logger.warning("dispatch.zcpg.fallback_to_legacy",
@@ -135,4 +139,35 @@ defmodule Men.Dispatch.Router do
       {:error, _reason} -> session_key
     end
   end
+
+  # runtime 返回会话失效错误时，清除本地映射，避免坏 session id 持续复用。
+  defp maybe_invalidate_runtime_session(state, context, error_payload) do
+    case invalidation_code(error_payload) do
+      nil ->
+        state
+
+      code when state.session_coordinator_enabled ->
+        reason = %{session_key: context.session_key, code: code}
+
+        try do
+          _ = SessionCoordinator.invalidate_by_session_key(state.session_coordinator_name, reason)
+          state
+        catch
+          :exit, _ -> state
+        end
+
+      _code ->
+        state
+    end
+  end
+
+  defp invalidation_code(%{} = error_payload) do
+    case Map.get(error_payload, :code) do
+      code when code in [:session_not_found, "session_not_found"] -> :session_not_found
+      code when code in [:runtime_session_not_found, "runtime_session_not_found"] -> :runtime_session_not_found
+      _ -> nil
+    end
+  end
+
+  defp invalidation_code(_), do: nil
 end

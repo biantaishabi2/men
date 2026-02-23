@@ -3,48 +3,65 @@ defmodule Mix.Tasks.Men.Cutover do
   cutover 运维命令。
 
   用法示例：
-    mix men.cutover status
-    mix men.cutover enable
-    mix men.cutover disable
-    mix men.cutover whitelist --set tenantA,tenantB
-    mix men.cutover rollback
-    mix men.cutover drill
+    mix men.cutover --status
+    mix men.cutover --enable
+    mix men.cutover --disable
+    mix men.cutover --set-whitelist tenantA,tenantB
+    mix men.cutover --rollback
+    mix men.cutover --drill
   """
 
   use Mix.Task
 
   @shortdoc "管理 men->zcpg cutover"
+  @switches [
+    status: :boolean,
+    enable: :boolean,
+    disable: :boolean,
+    rollback: :boolean,
+    drill: :boolean,
+    set_whitelist: :string
+  ]
 
   @impl Mix.Task
   def run(args) do
     Mix.Task.run("app.start")
+    {opts, rest, invalid} = OptionParser.parse(args, strict: @switches)
 
-    case args do
-      ["status"] ->
+    if rest != [] or invalid != [] do
+      invalid_usage!("invalid arguments")
+    end
+
+    action_count =
+      Enum.count([opts[:status], opts[:enable], opts[:disable], opts[:rollback], opts[:drill]], & &1) +
+        if(is_binary(opts[:set_whitelist]), do: 1, else: 0)
+
+    cond do
+      action_count == 0 ->
+        invalid_usage!("missing action")
+
+      action_count > 1 ->
+        invalid_usage!("only one action is allowed")
+
+      opts[:status] ->
         print_status()
 
-      ["enable"] ->
+      opts[:enable] ->
         update_cfg(fn cfg -> Keyword.put(cfg, :enabled, true) end)
         Mix.shell().info("cutover enabled")
         print_status()
 
-      ["disable"] ->
+      opts[:disable] ->
         update_cfg(fn cfg -> Keyword.put(cfg, :enabled, false) end)
         Mix.shell().info("cutover disabled")
         print_status()
 
-      ["whitelist", "--set", csv] ->
-        tenants =
-          csv
-          |> String.split(",", trim: true)
-          |> Enum.map(&String.trim/1)
-          |> Enum.reject(&(&1 == ""))
-
-        update_cfg(fn cfg -> Keyword.put(cfg, :tenant_whitelist, tenants) end)
+      is_binary(opts[:set_whitelist]) ->
+        update_cfg(fn cfg -> Keyword.put(cfg, :tenant_whitelist, parse_tenant_csv(opts[:set_whitelist])) end)
         Mix.shell().info("cutover whitelist updated")
         print_status()
 
-      ["rollback"] ->
+      opts[:rollback] ->
         update_cfg(fn cfg ->
           cfg
           |> Keyword.put(:enabled, false)
@@ -54,14 +71,10 @@ defmodule Mix.Tasks.Men.Cutover do
         Mix.shell().info("rollback done: cutover disabled and whitelist cleared")
         print_status()
 
-      ["drill"] ->
+      opts[:drill] ->
         Mix.shell().info(
           "rollback drill: simulated at #{DateTime.utc_now() |> DateTime.to_iso8601()}"
         )
-
-      _ ->
-        Mix.shell().error("unknown command")
-        Mix.shell().info("expected: status|enable|disable|whitelist --set <csv>|rollback|drill")
     end
   end
 
@@ -78,5 +91,19 @@ defmodule Mix.Tasks.Men.Cutover do
     Mix.shell().info("env_override=#{Keyword.get(cfg, :env_override, false)}")
     Mix.shell().info("timeout_ms=#{Keyword.get(cfg, :timeout_ms, 8_000)}")
     Mix.shell().info("breaker=#{inspect(Keyword.get(cfg, :breaker, []))}")
+  end
+
+  defp parse_tenant_csv(csv) when is_binary(csv) do
+    csv
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp invalid_usage!(reason) do
+    Mix.raise("""
+    #{reason}
+    usage: mix men.cutover --status|--enable|--disable|--set-whitelist <csv>|--rollback|--drill
+    """)
   end
 end

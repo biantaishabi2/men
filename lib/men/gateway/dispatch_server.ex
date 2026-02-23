@@ -17,6 +17,7 @@ defmodule Men.Gateway.DispatchServer do
           zcpg_client: module(),
           cutover_policy: module(),
           zcpg_cutover_config: keyword(),
+          zcpg_cutover_dynamic?: boolean(),
           zcpg_breaker: CircuitBreaker.t(),
           get_runtime_session_id: (GenServer.server(), binary() ->
                                      {:ok, binary()} | {:error, term()}),
@@ -72,6 +73,7 @@ defmodule Men.Gateway.DispatchServer do
     coordinator_config = Application.get_env(:men, SessionCoordinator, [])
     cutover_config = Application.get_env(:men, :zcpg_cutover, [])
     breaker_config = Keyword.get(cutover_config, :breaker, [])
+    dynamic_cutover? = not Keyword.has_key?(opts, :zcpg_cutover_config)
 
     state = %{
       legacy_bridge_adapter:
@@ -83,6 +85,7 @@ defmodule Men.Gateway.DispatchServer do
       zcpg_client: Keyword.get(opts, :zcpg_client, Men.Bridge.ZcpgClient),
       cutover_policy: Keyword.get(opts, :cutover_policy, Men.Dispatch.CutoverPolicy),
       zcpg_cutover_config: Keyword.get(opts, :zcpg_cutover_config, cutover_config),
+      zcpg_cutover_dynamic?: dynamic_cutover?,
       zcpg_breaker:
         Keyword.get(
           opts,
@@ -185,6 +188,8 @@ defmodule Men.Gateway.DispatchServer do
   end
 
   defp run_with_route(state, context) do
+    state = maybe_refresh_cutover_config(state)
+
     with {:ok, prompt} <- payload_to_prompt(context.payload) do
       case Router.execute(state, context, prompt) do
         {:ignore, routing_state} ->
@@ -545,6 +550,13 @@ defmodule Men.Gateway.DispatchServer do
         })
     }
   end
+
+  # 仅在未显式注入测试配置时，按请求动态读取 runtime env，确保 cutover 可即时切换。
+  defp maybe_refresh_cutover_config(%{zcpg_cutover_dynamic?: true} = state) do
+    %{state | zcpg_cutover_config: Application.get_env(:men, :zcpg_cutover, [])}
+  end
+
+  defp maybe_refresh_cutover_config(state), do: state
 
   defp fallback_context(%{} = inbound_event) do
     %{

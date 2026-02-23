@@ -63,6 +63,15 @@ defmodule Men.Integration.MenZcpgCutoverTest do
 
   setup do
     Application.put_env(:men, :men_zcpg_cutover_test_pid, self())
+    original_cutover = Application.get_env(:men, :zcpg_cutover, [])
+
+    Application.put_env(:men, :zcpg_cutover,
+      enabled: true,
+      tenant_whitelist: ["tenantA"],
+      env_override: false,
+      timeout_ms: 2_000,
+      breaker: [failure_threshold: 5, window_seconds: 30, cooldown_seconds: 60]
+    )
 
     server_name = {:global, {__MODULE__, self(), make_ref()}}
 
@@ -72,18 +81,12 @@ defmodule Men.Integration.MenZcpgCutoverTest do
        legacy_bridge_adapter: MockLegacyBridge,
        zcpg_client: MockZcpgClient,
        egress_adapter: MockEgress,
-       session_coordinator_enabled: false,
-       zcpg_cutover_config: [
-         enabled: true,
-         tenant_whitelist: ["tenantA"],
-         env_override: false,
-         timeout_ms: 2_000,
-         breaker: [failure_threshold: 5, window_seconds: 30, cooldown_seconds: 60]
-       ]}
+       session_coordinator_enabled: false}
     )
 
     on_exit(fn ->
       Application.delete_env(:men, :men_zcpg_cutover_test_pid)
+      Application.put_env(:men, :zcpg_cutover, original_cutover)
     end)
 
     {:ok, server: server_name}
@@ -129,5 +132,43 @@ defmodule Men.Integration.MenZcpgCutoverTest do
                     %Men.Channels.Egress.Messages.FinalMessage{} = message}
 
     assert message.content == "legacy-final"
+  end
+
+  test "手动 rollback 后立即全量走 legacy", %{server: server} do
+    fallback_event = %{
+      request_id: "req-zcpg-fallback-2",
+      payload: %{channel: "dingtalk", content: "@bot timeout", tenant_id: "tenantA"},
+      channel: "dingtalk",
+      user_id: "u-zcpg-fallback-rollback",
+      metadata: %{tenant_id: "tenantA", mention_required: true, mentioned: true}
+    }
+
+    assert {:ok, result1} = DispatchServer.dispatch(server, fallback_event)
+    assert result1.payload.text == "legacy-final"
+    assert_receive {:zcpg_called, _, _}
+    assert_receive {:legacy_called, _, _}
+    assert_receive {:egress_called, "dingtalk:u-zcpg-fallback-rollback", _}
+
+    Application.put_env(:men, :zcpg_cutover,
+      enabled: false,
+      tenant_whitelist: [],
+      env_override: false,
+      timeout_ms: 2_000,
+      breaker: [failure_threshold: 5, window_seconds: 30, cooldown_seconds: 60]
+    )
+
+    rollback_event = %{
+      request_id: "req-zcpg-rollback-2",
+      payload: %{channel: "dingtalk", content: "@bot after rollback", tenant_id: "tenantA"},
+      channel: "dingtalk",
+      user_id: "u-zcpg-fallback-rollback",
+      metadata: %{tenant_id: "tenantA", mention_required: true, mentioned: true}
+    }
+
+    assert {:ok, result2} = DispatchServer.dispatch(server, rollback_event)
+    assert result2.payload.text == "legacy-final"
+    refute_receive {:zcpg_called, _, _}
+    assert_receive {:legacy_called, _, _}
+    assert_receive {:egress_called, "dingtalk:u-zcpg-fallback-rollback", _}
   end
 end
