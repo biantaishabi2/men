@@ -100,3 +100,58 @@
 3. `agent_runtime_bridge` 负责与 `gong` 交互（CLI now, RPC later）。
 4. `channel_egress` 负责 action 的渠道回写。
 5. `foundation_infra` 负责幂等、日志、观测、订阅与重试支撑。
+
+## 06 JIT Orchestration Integration Acceptance (sub#34)
+
+### Telemetry Contract v1（冻结）
+
+事件前缀：`[:men, :gateway, :runtime, :jit, :v1]`
+
+必填字段：
+- `trace_id`
+- `session_id`
+- `flag_state`
+- `advisor_decision`
+- `snapshot_action`
+- `rollback_reason`
+
+兼容窗口：Telemetry v1 字段向后兼容 `2` 个 minor 版本。
+
+标准事件：
+- `graph_invoked`
+- `advisor_decided`
+- `snapshot_generated`
+- `rollback_triggered`
+- `degraded`
+- `cycle_completed`
+
+### Feature Flag 三态策略
+
+- `jit_enabled`：启用完整 JIT 编排（图计算 + advisor + snapshot）。
+- `smoke_mode`：启用最小链路（research 图 + advisor + snapshot），用于快速门禁。
+- `jit_disabled`：强制固定编排路径（`fixed_orchestration`），服务保持可用。
+
+### 回放脚本
+
+脚本路径：`scripts/jit/replay.sh`
+
+示例：
+
+```bash
+scripts/jit/replay.sh --input /tmp/jit-telemetry.jsonl --trace-id trace-flow-1
+scripts/jit/replay.sh --input /tmp/jit-telemetry.jsonl --session-id session-rollback-1
+```
+
+输出字段：`time/event/trace_id/session_id/flag/advisor/snapshot/rollback`
+
+### 验收样例
+
+- 场景 1（闭环）：`jit_enabled` 下 advisor 给出 `execute` 建议并被采纳，`snapshot_action=injected`。
+- 场景 2（回滚）：执行中前提失效触发 `rollback_triggered`，`snapshot_action=rebuilt`，主循环继续运行。
+- 场景 3（开关关闭）：`jit_disabled` 返回固定路径，`degraded=true` 且仍输出稳定结果。
+
+### 回滚操作
+
+1. 将 feature flag 设置为 `jit_disabled`。
+2. 保持 `DispatchServer` 主循环运行，观察 `degraded/cycle_completed` 事件持续上报。
+3. 使用回放脚本按 `trace_id/session_id` 验证决策链稳定。
