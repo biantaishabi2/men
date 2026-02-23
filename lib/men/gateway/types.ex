@@ -16,6 +16,7 @@ defmodule Men.Gateway.Types do
           optional(:session_key) => binary(),
           optional(:run_id) => binary(),
           optional(:metadata) => map(),
+          optional(:mode_signals) => map(),
           optional(:channel) => binary() | atom(),
           optional(:user_id) => binary() | atom() | integer(),
           optional(:group_id) => binary() | atom() | integer(),

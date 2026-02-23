@@ -107,6 +107,23 @@ defmodule Men.Gateway.DispatchServerTest do
     end
   end
 
+  defmodule MockRuntimeAdapter do
+    def orchestrate(runtime_state, opts) do
+      if pid = Application.get_env(:men, :dispatch_server_test_pid) do
+        send(pid, {:runtime_adapter_called, runtime_state, opts})
+      end
+
+      {:ok,
+       %{
+         flag_state: Keyword.get(opts, :jit_flag, :jit_enabled),
+         advisor_decision: :execute,
+         snapshot_action: :injected,
+         rollback_reason: nil,
+         degraded?: false
+       }}
+    end
+  end
+
   setup do
     Application.put_env(:men, :dispatch_server_test_pid, self())
     Application.delete_env(:men, :dispatch_server_test_fail_final_egress)
@@ -233,6 +250,39 @@ defmodule Men.Gateway.DispatchServerTest do
     assert message.content == "ok:hello"
     assert message.metadata.request_id == "req-1"
     assert message.metadata.run_id == result.run_id
+  end
+
+  test "dispatch 主链路会调用 runtime_adapter 并把 jit 字段写入 final metadata" do
+    server =
+      start_dispatch_server(runtime_adapter: MockRuntimeAdapter, jit_feature_flag: :smoke_mode)
+
+    event = %{
+      request_id: "req-jit-1",
+      payload: %{
+        goal: "验证 JIT 元数据",
+        policy: %{mode: :jit},
+        next_candidates: [%{id: "n1", title: "run"}]
+      },
+      mode_signals: %{premise_invalidated: false},
+      channel: "feishu",
+      user_id: "u-jit"
+    }
+
+    assert {:ok, result} = DispatchServer.dispatch(server, event)
+    assert result.request_id == "req-jit-1"
+
+    assert_receive {:runtime_adapter_called, runtime_state, opts}
+    assert runtime_state.goal == "验证 JIT 元数据"
+    assert Keyword.get(opts, :trace_id) == "req-jit-1"
+    assert Keyword.get(opts, :jit_flag) == :smoke_mode
+    assert Keyword.get(opts, :mode_signals) == %{premise_invalidated: false}
+
+    assert_receive {:egress_called, "feishu:u-jit", %FinalMessage{} = message}
+    assert message.metadata.jit_flag_state == :smoke_mode
+    assert message.metadata.jit_advisor_decision == :execute
+    assert message.metadata.jit_snapshot_action == :injected
+    assert message.metadata.jit_rollback_reason == nil
+    assert message.metadata.jit_degraded == false
   end
 
   test "同 key 连续消息复用 runtime_session_id" do

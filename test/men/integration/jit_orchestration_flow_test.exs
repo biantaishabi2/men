@@ -6,6 +6,30 @@ defmodule Men.Integration.JitOrchestrationFlowTest do
 
   @event_prefix [:men, :gateway, :runtime, :jit, :v1]
 
+  defmodule BridgeGraphAdapter do
+    def run(action, payload, _opts) do
+      send(self(), {:bridge_graph_called, action, payload})
+
+      case action do
+        :research_reduce ->
+          {:ok,
+           %{
+             result: "ok",
+             data: %{"diff" => %{"blocking_added" => []}},
+             diagnostics: %{"source" => "bridge-adapter"}
+           }}
+
+        :execute_compile ->
+          {:ok,
+           %{
+             result: "compiled",
+             data: %{"layers" => [["t-1"], ["t-2"]]},
+             diagnostics: %{"source" => "bridge-adapter"}
+           }}
+      end
+    end
+  end
+
   setup do
     handler_id = "jit-flow-#{System.unique_integer([:positive, :monotonic])}"
 
@@ -48,30 +72,12 @@ defmodule Men.Integration.JitOrchestrationFlowTest do
       execute_edges: [%{from: "t-1", to: "t-2"}]
     }
 
-    graph_runner = fn
-      :research_reduce, _payload ->
-        {:ok,
-         %{
-           result: "ok",
-           data: %{"diff" => %{"blocking_added" => []}},
-           diagnostics: %{"source" => "mock-research"}
-         }}
-
-      :execute_compile, _payload ->
-        {:ok,
-         %{
-           result: "compiled",
-           data: %{"layers" => [["t-1"], ["t-2"]]},
-           diagnostics: %{"source" => "mock-execute"}
-         }}
-    end
-
     assert {:ok, result} =
              Adapter.orchestrate(runtime_state,
                trace_id: "trace-flow-1",
                session_id: "session-flow-1",
                jit_flag: :jit_enabled,
-               graph_runner: graph_runner,
+               graph_adapter: BridgeGraphAdapter,
                current_mode: :research,
                mode_context: ModeStateMachine.initial_context(),
                mode_policy_apply: true,
@@ -90,6 +96,9 @@ defmodule Men.Integration.JitOrchestrationFlowTest do
     assert result.snapshot.goal == "修复断键任务"
     assert result.snapshot.snapshot_type == :action_snapshot
     assert result.snapshot.state_ref.event_id == "trace:trace-flow-1"
+
+    assert_receive {:bridge_graph_called, :research_reduce, _payload}
+    assert_receive {:bridge_graph_called, :execute_compile, _payload}
 
     telemetry_events = collect_telemetry_events(6)
 
@@ -123,14 +132,6 @@ defmodule Men.Integration.JitOrchestrationFlowTest do
       execute_edges: []
     }
 
-    graph_runner = fn
-      :research_reduce, _payload ->
-        {:ok, %{result: "ok", data: %{"diff" => %{"blocking_added" => []}}, diagnostics: %{}}}
-
-      :execute_compile, _payload ->
-        {:ok, %{result: "compiled", data: %{"layers" => [["t-1"]]}, diagnostics: %{}}}
-    end
-
     results =
       1..8
       |> Task.async_stream(
@@ -139,7 +140,7 @@ defmodule Men.Integration.JitOrchestrationFlowTest do
             trace_id: "trace-flow-concurrent-#{idx}",
             session_id: "session-flow-concurrent-#{idx}",
             jit_flag: :jit_enabled,
-            graph_runner: graph_runner,
+            graph_adapter: BridgeGraphAdapter,
             current_mode: :research,
             mode_context: ModeStateMachine.initial_context(),
             mode_policy_apply: true,

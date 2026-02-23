@@ -10,6 +10,7 @@ defmodule Men.Gateway.DispatchServer do
   alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
   alias Men.Gateway.EventEnvelope
   alias Men.Gateway.InboxStore
+  alias Men.Gateway.Runtime.Adapter
   alias Men.Gateway.Runtime.ModeStateMachine
   alias Men.Gateway.SessionCoordinator
   alias Men.Gateway.Types
@@ -42,6 +43,8 @@ defmodule Men.Gateway.DispatchServer do
           mode_transition_suppression_window_ticks: non_neg_integer(),
           mode_transition_suppression_limit: non_neg_integer(),
           mode_transition_recovery_ticks: non_neg_integer(),
+          runtime_adapter: module(),
+          jit_feature_flag: Adapter.jit_flag(),
           run_terminal_limit: pos_integer(),
           run_terminal_order: :queue.queue(binary()),
           session_last_context: %{optional(binary()) => Types.run_context()},
@@ -198,6 +201,10 @@ defmodule Men.Gateway.DispatchServer do
           :mode_transition_recovery_ticks,
           Keyword.get(config, :mode_transition_recovery_ticks, 6)
         ),
+      runtime_adapter:
+        Keyword.get(opts, :runtime_adapter, Keyword.get(config, :runtime_adapter, Adapter)),
+      jit_feature_flag:
+        Keyword.get(opts, :jit_feature_flag, Keyword.get(config, :jit_feature_flag, :jit_enabled)),
       run_terminal_limit:
         Keyword.get(opts, :run_terminal_limit, Keyword.get(config, :run_terminal_limit, 1_000)),
       run_terminal_order: :queue.new(),
@@ -663,7 +670,7 @@ defmodule Men.Gateway.DispatchServer do
 
     case do_start_turn(state, context) do
       {:ok, bridge_payload, run_context} ->
-        case do_send_final(state, context, bridge_payload) do
+        case do_send_final(state, context, run_context, bridge_payload) do
           :ok ->
             dispatch_result = build_dispatch_result(context, bridge_payload)
             reply = {:ok, dispatch_result}
@@ -724,6 +731,10 @@ defmodule Men.Gateway.DispatchServer do
          request_id: request_id,
          payload: payload,
          metadata: metadata,
+         mode_signals:
+           inbound_event
+           |> Map.get(:mode_signals, %{})
+           |> normalize_overrides(),
          session_key: session_key,
          run_id: run_id
        }}
@@ -784,7 +795,8 @@ defmodule Men.Gateway.DispatchServer do
   defp do_start_turn(state, context) do
     with {:ok, prompt} <- payload_to_prompt(context.payload),
          {:ok, run_context} <-
-           resolve_runtime_context(state, context.session_key, context.run_id, 1) do
+           resolve_runtime_context(state, context.session_key, context.run_id, 1),
+         {:ok, run_context} <- enrich_runtime_context(state, context, run_context) do
       case call_bridge(state, prompt, context, run_context) do
         {:ok, payload} ->
           {:ok, payload, run_context}
@@ -934,6 +946,69 @@ defmodule Men.Gateway.DispatchServer do
     state.bridge_adapter.start_turn(prompt, bridge_context)
   end
 
+  # 在主链路内执行 JIT 运行时决策，并将结果附加到 run_context（供 egress metadata 使用）。
+  defp enrich_runtime_context(state, context, run_context) do
+    runtime_state = build_runtime_state(context)
+
+    adapter_opts = [
+      trace_id: context.request_id,
+      session_id: context.session_key,
+      jit_flag: state.jit_feature_flag,
+      current_mode: state.mode_state_machine_mode,
+      mode_context: state.mode_state_machine_context,
+      mode_policy_apply: state.mode_policy_apply,
+      mode_state_machine_options: state.mode_state_machine_options,
+      mode_signals: Map.get(context, :mode_signals, %{})
+    ]
+
+    case state.runtime_adapter.orchestrate(runtime_state, adapter_opts) do
+      {:ok, jit_result} ->
+        {:ok, Map.put(run_context, :jit_result, jit_result)}
+
+      {:error, reason} ->
+        Logger.warning(
+          "gateway.dispatch jit enrich failed run_id=#{context.run_id} reason=#{inspect(reason)}"
+        )
+
+        {:ok, run_context}
+    end
+  end
+
+  defp build_runtime_state(context) do
+    payload_map =
+      case context.payload do
+        %{} = payload -> payload
+        _ -> %{}
+      end
+
+    %{
+      goal: Map.get(payload_map, :goal) || Map.get(payload_map, "goal"),
+      policy: Map.get(payload_map, :policy) || Map.get(payload_map, "policy"),
+      current_focus:
+        Map.get(payload_map, :current_focus) || Map.get(payload_map, "current_focus"),
+      next_candidates:
+        Map.get(payload_map, :next_candidates) || Map.get(payload_map, "next_candidates") || [],
+      constraints:
+        Map.get(payload_map, :constraints) || Map.get(payload_map, "constraints") || [],
+      recommendations:
+        Map.get(payload_map, :recommendations) || Map.get(payload_map, "recommendations") || [],
+      research_state:
+        Map.get(payload_map, :research_state) || Map.get(payload_map, "research_state") || %{},
+      research_events:
+        Map.get(payload_map, :research_events) || Map.get(payload_map, "research_events") || [],
+      execute_tasks:
+        Map.get(payload_map, :execute_tasks) || Map.get(payload_map, "execute_tasks") || [],
+      execute_edges:
+        Map.get(payload_map, :execute_edges) || Map.get(payload_map, "execute_edges") || [],
+      key_claim_confidence:
+        Map.get(payload_map, :key_claim_confidence) ||
+          Map.get(payload_map, "key_claim_confidence") || 0.0,
+      graph_change_rate:
+        Map.get(payload_map, :graph_change_rate) || Map.get(payload_map, "graph_change_rate") ||
+          1.0
+    }
+  end
+
   defp should_retry_session_not_found?(state, run_context, error_payload) do
     state.session_rebuild_retry_enabled and
       run_context.attempt == 1 and
@@ -953,10 +1028,13 @@ defmodule Men.Gateway.DispatchServer do
 
   defp normalize_error_code(_), do: ""
 
-  defp do_send_final(state, context, bridge_payload) do
+  defp do_send_final(state, context, run_context, bridge_payload) do
+    jit_meta = build_jit_metadata(run_context)
+
     metadata =
       context.metadata
       |> Map.merge(Map.get(bridge_payload, :meta, %{}))
+      |> Map.merge(jit_meta)
       |> Map.merge(%{
         request_id: context.request_id,
         run_id: context.run_id,
@@ -971,6 +1049,18 @@ defmodule Men.Gateway.DispatchServer do
 
     state.egress_adapter.send(context.session_key, message)
   end
+
+  defp build_jit_metadata(%{jit_result: jit_result}) when is_map(jit_result) do
+    %{
+      jit_flag_state: Map.get(jit_result, :flag_state),
+      jit_advisor_decision: Map.get(jit_result, :advisor_decision),
+      jit_snapshot_action: Map.get(jit_result, :snapshot_action),
+      jit_rollback_reason: Map.get(jit_result, :rollback_reason),
+      jit_degraded: Map.get(jit_result, :degraded?, false)
+    }
+  end
+
+  defp build_jit_metadata(_context), do: %{}
 
   defp do_send_error(state, context, error_payload) do
     message = %ErrorMessage{

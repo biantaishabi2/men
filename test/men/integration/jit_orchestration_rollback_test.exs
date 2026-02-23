@@ -6,6 +6,27 @@ defmodule Men.Integration.JitOrchestrationRollbackTest do
 
   @event_prefix [:men, :gateway, :runtime, :jit, :v1]
 
+  defmodule BridgeGraphAdapter do
+    def run(action, payload, _opts) do
+      send(self(), {:bridge_graph_called, action, payload})
+
+      case action do
+        :research_reduce ->
+          {:ok, %{result: "ok", data: %{"diff" => %{"blocking_added" => []}}, diagnostics: %{}}}
+
+        :execute_compile ->
+          {:ok, %{result: "compiled", data: %{"layers" => [["task-a"]]}, diagnostics: %{}}}
+      end
+    end
+  end
+
+  defmodule FailResearchGraphAdapter do
+    def run(:research_reduce, _payload, _opts), do: {:error, "research crashed"}
+
+    def run(:execute_compile, _payload, _opts),
+      do: {:ok, %{result: "compiled", data: %{}, diagnostics: %{}}}
+  end
+
   setup do
     handler_id = "jit-rollback-#{System.unique_integer([:positive, :monotonic])}"
 
@@ -48,20 +69,12 @@ defmodule Men.Integration.JitOrchestrationRollbackTest do
       execute_edges: []
     }
 
-    graph_runner = fn
-      :research_reduce, _payload ->
-        {:ok, %{result: "ok", data: %{"diff" => %{"blocking_added" => []}}, diagnostics: %{}}}
-
-      :execute_compile, _payload ->
-        {:ok, %{result: "compiled", data: %{"layers" => [["task-a"]]}, diagnostics: %{}}}
-    end
-
     assert {:ok, result} =
              Adapter.orchestrate(runtime_state,
                trace_id: "trace-rollback-1",
                session_id: "session-rollback-1",
                jit_flag: :jit_enabled,
-               graph_runner: graph_runner,
+               graph_adapter: BridgeGraphAdapter,
                current_mode: :execute,
                mode_context: ModeStateMachine.initial_context(),
                mode_policy_apply: true,
@@ -79,6 +92,9 @@ defmodule Men.Integration.JitOrchestrationRollbackTest do
     assert result.loop_status == :running
     assert result.degraded? == false
     assert result.snapshot.snapshot_type == :idle_snapshot
+
+    assert_receive {:bridge_graph_called, :research_reduce, _payload}
+    assert_receive {:bridge_graph_called, :execute_compile, _payload}
 
     assert Enum.any?(result.snapshot.recommendations, fn recommendation ->
              String.contains?(recommendation.text, "rollback")
@@ -121,17 +137,12 @@ defmodule Men.Integration.JitOrchestrationRollbackTest do
       policy: %{mode: :jit}
     }
 
-    graph_runner = fn
-      :research_reduce, _payload -> {:error, "research crashed"}
-      :execute_compile, _payload -> {:ok, %{result: "compiled", data: %{}, diagnostics: %{}}}
-    end
-
     assert {:ok, result} =
              Adapter.orchestrate(runtime_state,
                trace_id: "trace-graph-failed-1",
                session_id: "session-graph-failed-1",
                jit_flag: :jit_enabled,
-               graph_runner: graph_runner
+               graph_adapter: FailResearchGraphAdapter
              )
 
     assert result.degraded? == true
