@@ -172,6 +172,34 @@ defmodule MenWeb.Webhooks.QiweiControllerTest do
     refute_receive {:dispatch_called, _}
   end
 
+  test "POST AES key 长度异常返回 401 且不调用 dispatch", %{conn: conn} do
+    bad_key = Base.encode64("short") |> String.trim_trailing("=")
+
+    Application.put_env(
+      :men,
+      MenWeb.Webhooks.QiweiController,
+      Application.get_env(:men, MenWeb.Webhooks.QiweiController, [])
+      |> Keyword.put(:encoding_aes_key, bad_key)
+    )
+
+    message_xml = inbound_message_xml(msg_type: "text", from_user: "user-7", msg_id: "msg-7")
+    encrypt = encrypt_payload(message_xml)
+    timestamp = Integer.to_string(System.system_time(:second))
+    nonce = "nonce-post-bad-aes-key"
+    signature = sign("qiwei-token", timestamp, nonce, encrypt)
+
+    conn =
+      conn
+      |> put_req_header("content-type", "text/xml")
+      |> post(
+        "/webhooks/qiwei?timestamp=#{timestamp}&nonce=#{nonce}&msg_signature=#{signature}",
+        callback_outer_xml(encrypt)
+      )
+
+    assert json_response(conn, 401) == %{"status" => "error", "code" => "UNAUTHORIZED"}
+    refute_receive {:dispatch_called, _}
+  end
+
   test "POST 下游超时/失败降级 success", %{conn: conn} do
     message_xml =
       inbound_message_xml(

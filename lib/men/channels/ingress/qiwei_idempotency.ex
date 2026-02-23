@@ -9,7 +9,7 @@ defmodule Men.Channels.Ingress.QiweiIdempotency do
 
   @default_ttl_seconds 120
   @wait_interval_ms 20
-  @wait_max_attempts 50
+  @pending_wait_buffer_ms 500
   @pending_state :pending
 
   @type response_payload :: %{type: :success} | %{type: :xml, body: binary()}
@@ -319,20 +319,17 @@ defmodule Men.Channels.Ingress.QiweiIdempotency do
     end
   end
 
-  defp wait_for_response_or_run(
-         backend,
-         key,
-         ttl_seconds,
-         callback,
-         attempts \\ @wait_max_attempts
-       )
-
-  defp wait_for_response_or_run(_backend, _key, _ttl_seconds, callback, attempts)
-       when attempts <= 0 do
-    callback.()
+  defp wait_for_response_or_run(backend, key, ttl_seconds, callback) do
+    wait_for_response_or_run(
+      backend,
+      key,
+      ttl_seconds,
+      callback,
+      pending_wait_deadline_ms(ttl_seconds)
+    )
   end
 
-  defp wait_for_response_or_run(backend, key, ttl_seconds, callback, attempts) do
+  defp wait_for_response_or_run(backend, key, ttl_seconds, callback, deadline_ms) do
     case backend_get(backend, key) do
       {:ok, %{} = cached_or_marker} ->
         cond do
@@ -340,8 +337,12 @@ defmodule Men.Channels.Ingress.QiweiIdempotency do
             cached_or_marker
 
           pending_marker?(cached_or_marker) ->
-            Process.sleep(@wait_interval_ms)
-            wait_for_response_or_run(backend, key, ttl_seconds, callback, attempts - 1)
+            if wait_deadline_exceeded?(deadline_ms) do
+              claim_and_evaluate(backend, key, ttl_seconds, callback)
+            else
+              Process.sleep(@wait_interval_ms)
+              wait_for_response_or_run(backend, key, ttl_seconds, callback, deadline_ms)
+            end
 
           true ->
             claim_and_evaluate(backend, key, ttl_seconds, callback)
@@ -354,6 +355,14 @@ defmodule Men.Channels.Ingress.QiweiIdempotency do
         Logger.warning("qiwei.idempotency.backend_wait_failed", reason: inspect(reason), key: key)
         callback.()
     end
+  end
+
+  defp pending_wait_deadline_ms(ttl_seconds) when is_integer(ttl_seconds) and ttl_seconds > 0 do
+    System.monotonic_time(:millisecond) + ttl_seconds * 1_000 + @pending_wait_buffer_ms
+  end
+
+  defp wait_deadline_exceeded?(deadline_ms) do
+    System.monotonic_time(:millisecond) >= deadline_ms
   end
 
   defp backend_get(backend, key) do

@@ -146,7 +146,11 @@ defmodule MenWeb.Webhooks.QiweiController do
     |> Map.put(:payload, Map.put(payload, :mentioned, mentioned))
     |> Map.put(
       :metadata,
-      Map.merge(metadata, %{mentioned: mentioned, mention_required: mention_required})
+      Map.merge(metadata, %{
+        mentioned: mentioned,
+        mention_required: mention_required,
+        disable_legacy_fallback: true
+      })
     )
   end
 
@@ -271,10 +275,16 @@ defmodule MenWeb.Webhooks.QiweiController do
   end
 
   defp decode_aes_key(value) when is_binary(value) and value != "" do
-    decode_base64(value <> "=")
+    with {:ok, decoded} <- decode_base64(value <> "="),
+         :ok <- validate_aes_key(decoded) do
+      {:ok, decoded}
+    end
   end
 
   defp decode_aes_key(_), do: {:error, :missing_encoding_aes_key}
+
+  defp validate_aes_key(decoded) when is_binary(decoded) and byte_size(decoded) == 32, do: :ok
+  defp validate_aes_key(_), do: {:error, :invalid_encoding_aes_key}
 
   defp decode_base64(value) do
     case Base.decode64(value) do

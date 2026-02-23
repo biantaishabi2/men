@@ -43,7 +43,9 @@ defmodule Men.Dispatch.Router do
 
   defp execute_legacy(state, context, prompt) do
     case state.legacy_bridge_adapter.start_turn(prompt, bridge_context(context, state)) do
-      {:ok, payload} -> {:ok, payload, state}
+      {:ok, payload} ->
+        {:ok, payload, state}
+
       {:error, error_payload} ->
         state = maybe_invalidate_runtime_session(state, context, error_payload)
         {:error, error_payload, state}
@@ -77,7 +79,7 @@ defmodule Men.Dispatch.Router do
             state = %{state | zcpg_breaker: breaker_after_failure}
             state = maybe_invalidate_runtime_session(state, context, error_payload)
 
-            if fallback_required?(error_payload) do
+            if fallback_required?(error_payload, context) do
               Logger.warning("dispatch.zcpg.fallback_to_legacy",
                 request_id: context.request_id,
                 run_id: context.run_id,
@@ -98,11 +100,18 @@ defmodule Men.Dispatch.Router do
     end
   end
 
-  defp fallback_required?(error_payload) when is_map(error_payload) do
-    Map.get(error_payload, :fallback, false)
+  defp fallback_required?(error_payload, context)
+       when is_map(error_payload) and is_map(context) do
+    not disable_legacy_fallback?(context) and Map.get(error_payload, :fallback, false)
   end
 
-  defp fallback_required?(_), do: false
+  defp fallback_required?(_error_payload, _context), do: false
+
+  defp disable_legacy_fallback?(context) do
+    context
+    |> Map.get(:metadata, %{})
+    |> Map.get(:disable_legacy_fallback, false)
+  end
 
   defp mark_route(%{meta: meta} = payload, route) when is_map(meta) do
     %{payload | meta: Map.put(meta, :dispatch_route, route)}
@@ -167,9 +176,14 @@ defmodule Men.Dispatch.Router do
 
   defp invalidation_code(%{} = error_payload) do
     case Map.get(error_payload, :code) do
-      code when code in [:session_not_found, "session_not_found"] -> :session_not_found
-      code when code in [:runtime_session_not_found, "runtime_session_not_found"] -> :runtime_session_not_found
-      _ -> nil
+      code when code in [:session_not_found, "session_not_found"] ->
+        :session_not_found
+
+      code when code in [:runtime_session_not_found, "runtime_session_not_found"] ->
+        :runtime_session_not_found
+
+      _ ->
+        nil
     end
   end
 

@@ -184,4 +184,36 @@ defmodule Men.Channels.Ingress.QiweiIdempotencyTest do
     assert Enum.all?(results, &(&1 == %{type: :xml, body: "<xml>first</xml>"}))
     assert Agent.get(counter, & &1) == 1
   end
+
+  test "并发长耗时请求在等待窗口外仍只执行一次 side effect" do
+    event = %{
+      payload: %{
+        corp_id: "wwcorp",
+        agent_id: 1_000_001,
+        msg_id: "mid-concurrent-long-#{System.unique_integer([:positive])}"
+      }
+    }
+
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    callback = fn ->
+      Agent.update(counter, &(&1 + 1))
+      Process.sleep(1_300)
+      %{type: :xml, body: "<xml>long-first</xml>"}
+    end
+
+    results =
+      1..6
+      |> Task.async_stream(
+        fn _ ->
+          QiweiIdempotency.with_idempotency(event, callback, backend: ConcurrentBackend)
+        end,
+        max_concurrency: 6,
+        timeout: 8_000
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.all?(results, &(&1 == %{type: :xml, body: "<xml>long-first</xml>"}))
+    assert Agent.get(counter, & &1) == 1
+  end
 end

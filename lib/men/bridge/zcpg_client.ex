@@ -19,7 +19,7 @@ defmodule Men.Bridge.ZcpgClient do
 
   def start_turn(prompt, context) when is_binary(prompt) and is_map(context) do
     start_ms = System.monotonic_time(:millisecond)
-    timeout_ms = timeout_ms(context)
+    timeout_ms = timeout_ms()
 
     request = %Request{
       runtime_id: "zcpg",
@@ -127,30 +127,7 @@ defmodule Men.Bridge.ZcpgClient do
     )
   end
 
-  defp timeout_ms(context) do
-    callback_timeout =
-      case map_value(context, :callback_timeout_ms, nil) do
-        value when is_binary(value) ->
-          case Integer.parse(value) do
-            {parsed, ""} when parsed > 0 -> parsed
-            _ -> nil
-          end
-
-        value when is_integer(value) and value > 0 ->
-          value
-
-        _ ->
-          nil
-      end
-
-    if callback_timeout do
-      callback_timeout
-    else
-      timeout_ms_from_cutover()
-    end
-  end
-
-  defp timeout_ms_from_cutover do
+  defp timeout_ms do
     cfg = Application.get_env(:men, :zcpg_cutover, [])
     Keyword.get(cfg, :timeout_ms, @default_timeout_ms)
   end

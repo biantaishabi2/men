@@ -154,9 +154,9 @@ defmodule Men.Integration.QiweiCallbackFlowTest do
         "nonce-flow-3"
       )
 
-    assert response(conn_1, 200) =~ "<![CDATA[legacy-final]]>"
+    assert response(conn_1, 200) == "success"
     assert_receive {:zcpg_called, _, _}
-    assert_receive {:legacy_called, _, _}
+    refute_receive {:legacy_called, _, _}
 
     Application.put_env(:men, :zcpg_cutover,
       enabled: false,
