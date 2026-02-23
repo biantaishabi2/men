@@ -37,14 +37,17 @@ defmodule Men.Ops.Policy.Source.Config do
   defp do_fetch(identity) do
     policies = Application.get_env(:men, :ops_policy, []) |> Keyword.get(:default_policies, %{})
 
-    key = {identity.tenant, identity.env, identity.scope, identity.policy_key}
+    keys = [
+      {identity.tenant, identity.env, identity.scope, identity.policy_key},
+      {"default", identity.env, identity.scope, identity.policy_key}
+    ]
 
-    case Map.get(policies, key) do
-      value when is_map(value) ->
-        {:ok, value}
-
-      _ ->
-        {:error, :not_found}
+    case Enum.find_value(keys, fn key ->
+           value = Map.get(policies, key)
+           if is_map(value), do: value, else: nil
+         end) do
+      nil -> {:error, :not_found}
+      value -> {:ok, value}
     end
   end
 

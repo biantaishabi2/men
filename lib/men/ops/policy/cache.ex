@@ -181,10 +181,18 @@ defmodule Men.Ops.Policy.Cache do
   defp normalize_entry(_, _), do: {:error, :invalid_record}
 
   defp bump_latest_version(version) when is_integer(version) and version >= 0 do
-    current = latest_version()
+    true = ensure_tables()
 
-    if version > current do
-      :ets.insert(@meta_table, {:latest_version, version})
+    replaced =
+      :ets.select_replace(@meta_table, [
+        {{:latest_version, :"$1"}, [{:<, :"$1", version}], [{{:latest_version, version}}]}
+      ])
+
+    if replaced == 0 do
+      :ets.insert_new(@meta_table, {:latest_version, version})
+      :ok
+    else
+      :ok
     end
   end
 

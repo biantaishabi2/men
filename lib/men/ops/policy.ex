@@ -57,6 +57,25 @@ defmodule Men.Ops.Policy do
             emit_get_observability(identity, result)
             {:ok, result}
 
+          {:error, :not_found} ->
+            case config_source().fetch(identity) do
+              {:ok, record} ->
+                result =
+                  build_result(
+                    record.value,
+                    record.policy_version,
+                    :config,
+                    false,
+                    :db_not_found_use_config
+                  )
+
+                emit_get_observability(identity, result)
+                {:ok, result}
+
+              {:error, config_reason} ->
+                {:error, {:policy_unavailable, :not_found, config_reason}}
+            end
+
           {:error, _reason} ->
             result =
               build_result(

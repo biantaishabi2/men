@@ -167,33 +167,37 @@ defmodule Men.Ops.Policy.Sync do
   end
 
   defp emit_sync_telemetry(action, version, records, result, reason) do
-    :telemetry.execute(
-      [:men, :ops, :policy, :sync, action],
-      %{count: length(records)},
-      %{
-        policy_version: version,
-        source: :db,
-        cache_hit: false,
-        reconcile_result: result,
-        fallback_reason: reason
-      }
-    )
+    if telemetry_enabled?() do
+      :telemetry.execute(
+        [:men, :ops, :policy, :sync, action],
+        %{count: length(records)},
+        %{
+          policy_version: version,
+          source: :db,
+          cache_hit: false,
+          reconcile_result: result,
+          fallback_reason: reason
+        }
+      )
+    end
   rescue
     _ -> :ok
   end
 
   defp emit_reconcile_telemetry(db_version, cache_version, result, reason) do
-    :telemetry.execute(
-      [:men, :ops, :policy, :sync, :reconcile],
-      %{count: 1},
-      %{
-        policy_version: db_version || cache_version,
-        source: :db,
-        cache_hit: false,
-        reconcile_result: result,
-        fallback_reason: reason
-      }
-    )
+    if telemetry_enabled?() do
+      :telemetry.execute(
+        [:men, :ops, :policy, :sync, :reconcile],
+        %{count: 1},
+        %{
+          policy_version: db_version || cache_version,
+          source: :db,
+          cache_hit: false,
+          reconcile_result: result,
+          fallback_reason: reason
+        }
+      )
+    end
   rescue
     _ -> :ok
   end
@@ -206,5 +210,10 @@ defmodule Men.Ops.Policy.Sync do
   defp sync_enabled? do
     Application.get_env(:men, :ops_policy, [])
     |> Keyword.get(:sync_enabled, true)
+  end
+
+  defp telemetry_enabled? do
+    Application.get_env(:men, :ops_policy, [])
+    |> Keyword.get(:telemetry_enabled, true)
   end
 end

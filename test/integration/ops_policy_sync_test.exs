@@ -19,6 +19,7 @@ defmodule Men.Integration.OpsPolicySyncTest do
       |> Keyword.put(:cache_ttl_ms, 60_000)
       |> Keyword.put(:reconcile_interval_ms, 80)
       |> Keyword.put(:reconcile_jitter_ms, 0)
+      |> Keyword.put(:telemetry_enabled, true)
       |> Keyword.put(:default_policies, %{
         {"t1", "prod", "dispatch", "acl_default"} => %{"mode" => "deny_all", "allow" => []}
       })
@@ -77,6 +78,38 @@ defmodule Men.Integration.OpsPolicySyncTest do
     assert {:ok, result} = Policy.get(identity)
     assert result.version == second.policy_version
     assert result.value["mode"] == "strict-v2"
+  end
+
+  test "telemetry 开关关闭时：sync 不上报 telemetry" do
+    handler_id = "ops-policy-sync-telemetry-#{System.unique_integer([:positive])}"
+    parent = self()
+
+    :telemetry.attach_many(
+      handler_id,
+      [
+        [:men, :ops, :policy, :sync, :event_refresh],
+        [:men, :ops, :policy, :sync, :reconcile]
+      ],
+      fn event, _measurements, _metadata, _config ->
+        send(parent, {:telemetry_event, event})
+      end,
+      nil
+    )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+
+    Application.put_env(
+      :men,
+      :ops_policy,
+      Application.get_env(:men, :ops_policy, []) |> Keyword.put(:telemetry_enabled, false)
+    )
+
+    assert :ok = Sync.reconcile_once()
+
+    refute_receive {:telemetry_event, [:men, :ops, :policy, :sync, :event_refresh]}, 100
+    refute_receive {:telemetry_event, [:men, :ops, :policy, :sync, :reconcile]}, 100
   end
 
   defp assert_eventually(fun, attempts \\ 40)
