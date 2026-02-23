@@ -11,6 +11,53 @@ defmodule Men.Channels.Ingress.QiweiIdempotencyTest do
 
     @impl true
     def put_if_absent(_key, _value, _ttl_seconds), do: {:error, :backend_down}
+
+    @impl true
+    def put(_key, _value, _ttl_seconds), do: {:error, :backend_down}
+  end
+
+  defmodule ConcurrentBackend do
+    @behaviour Men.Channels.Ingress.QiweiIdempotency.Backend
+
+    def start_link do
+      Agent.start_link(fn -> %{} end, name: __MODULE__)
+    end
+
+    def reset do
+      Agent.update(__MODULE__, fn _ -> %{} end)
+    end
+
+    @impl true
+    def get(key) do
+      {:ok, Agent.get(__MODULE__, &Map.get(&1, key))}
+    end
+
+    @impl true
+    def put_if_absent(key, value, _ttl_seconds) do
+      Agent.get_and_update(__MODULE__, fn state ->
+        if Map.has_key?(state, key) do
+          {{:error, :exists}, state}
+        else
+          {:ok, Map.put(state, key, value)}
+        end
+      end)
+    end
+
+    @impl true
+    def put(key, value, _ttl_seconds) do
+      Agent.update(__MODULE__, &Map.put(&1, key, value))
+      :ok
+    end
+  end
+
+  setup_all do
+    {:ok, _pid} = ConcurrentBackend.start_link()
+    :ok
+  end
+
+  setup do
+    ConcurrentBackend.reset()
+    :ok
   end
 
   test "消息 key 生成使用 corp_id+agent_id+msg_id" do
@@ -104,5 +151,37 @@ defmodule Men.Channels.Ingress.QiweiIdempotencyTest do
       )
 
     assert response == %{type: :success}
+  end
+
+  test "并发重复请求仅执行一次 side effect" do
+    event = %{
+      payload: %{
+        corp_id: "wwcorp",
+        agent_id: 1_000_001,
+        msg_id: "mid-concurrent-#{System.unique_integer([:positive])}"
+      }
+    }
+
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    callback = fn ->
+      Agent.update(counter, &(&1 + 1))
+      Process.sleep(80)
+      %{type: :xml, body: "<xml>first</xml>"}
+    end
+
+    results =
+      1..8
+      |> Task.async_stream(
+        fn _ ->
+          QiweiIdempotency.with_idempotency(event, callback, backend: ConcurrentBackend)
+        end,
+        max_concurrency: 8,
+        timeout: 5_000
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.all?(results, &(&1 == %{type: :xml, body: "<xml>first</xml>"}))
+    assert Agent.get(counter, & &1) == 1
   end
 end

@@ -28,6 +28,19 @@ parse_positive_integer_env = fn env_name, default ->
   end
 end
 
+parse_non_negative_integer_env = fn env_name, default ->
+  case System.get_env(env_name) do
+    nil ->
+      default
+
+    value ->
+      case Integer.parse(value) do
+        {parsed, ""} when parsed >= 0 -> parsed
+        _ -> default
+      end
+  end
+end
+
 parse_boolean_env = fn env_name, default ->
   case System.get_env(env_name) do
     nil ->
@@ -86,6 +99,7 @@ parse_module_env = fn env_name, default ->
     value ->
       case String.downcase(String.trim(value)) do
         "ets" -> Men.Channels.Ingress.QiweiIdempotency.Backend.ETS
+        "redis" -> Men.Channels.Ingress.QiweiIdempotency.Backend.Redis
         _ -> default
       end
   end
@@ -148,8 +162,16 @@ config :men, MenWeb.Webhooks.QiweiController,
   idempotency_backend:
     parse_module_env.(
       "QIWEI_IDEMPOTENCY_BACKEND",
-      Men.Channels.Ingress.QiweiIdempotency.Backend.ETS
+      Men.Channels.Ingress.QiweiIdempotency.Backend.Redis
     )
+
+config :men, Men.Channels.Ingress.QiweiIdempotency.Backend.Redis,
+  url: System.get_env("QIWEI_IDEMPOTENCY_REDIS_URL") || System.get_env("REDIS_URL"),
+  host: System.get_env("QIWEI_IDEMPOTENCY_REDIS_HOST") || "127.0.0.1",
+  port: parse_positive_integer_env.("QIWEI_IDEMPOTENCY_REDIS_PORT", 6379),
+  password: System.get_env("QIWEI_IDEMPOTENCY_REDIS_PASSWORD"),
+  database: parse_non_negative_integer_env.("QIWEI_IDEMPOTENCY_REDIS_DB", 0),
+  timeout_ms: parse_positive_integer_env.("QIWEI_IDEMPOTENCY_REDIS_TIMEOUT_MS", 1_000)
 
 gong_rpc_node_start_type =
   case System.get_env("GONG_RPC_NODE_START_TYPE") do

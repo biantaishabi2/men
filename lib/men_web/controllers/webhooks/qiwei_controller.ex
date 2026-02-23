@@ -248,7 +248,7 @@ defmodule MenWeb.Webhooks.QiweiController do
     with {:ok, aes_key} <- decode_aes_key(encoding_aes_key),
          {:ok, cipher_text} <- decode_base64(encrypted),
          iv <- binary_part(aes_key, 0, 16),
-         plain_padded <- :crypto.crypto_one_time(:aes_256_cbc, aes_key, iv, cipher_text, false),
+         {:ok, plain_padded} <- decrypt_cipher_text(aes_key, iv, cipher_text),
          {:ok, plain} <- pkcs7_unpad(plain_padded),
          {:ok, xml, recv_id} <- unpack_plain_text(plain),
          :ok <- verify_receive_id(recv_id, receive_id) do
@@ -256,6 +256,17 @@ defmodule MenWeb.Webhooks.QiweiController do
     else
       {:error, reason} -> {:error, {:unauthorized, reason}}
       _ -> {:error, {:unauthorized, :decrypt_failed}}
+    end
+  end
+
+  # 兼容畸形密文导致的底层异常，统一按鉴权失败处理，避免 500。
+  defp decrypt_cipher_text(aes_key, iv, cipher_text) do
+    try do
+      {:ok, :crypto.crypto_one_time(:aes_256_cbc, aes_key, iv, cipher_text, false)}
+    rescue
+      _ -> {:error, :decrypt_failed}
+    catch
+      _, _ -> {:error, :decrypt_failed}
     end
   end
 
