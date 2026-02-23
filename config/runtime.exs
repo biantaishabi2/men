@@ -11,6 +11,7 @@ runtime_bridge_impl =
   case System.get_env("RUNTIME_BRIDGE_IMPL") do
     "mock" -> Men.RuntimeBridge.Mock
     "gong_rpc" -> Men.RuntimeBridge.GongRPC
+    "zcpg_rpc" -> Men.RuntimeBridge.ZcpgRPC
     _ -> Men.RuntimeBridge.GongCLI
   end
 
@@ -40,6 +41,19 @@ parse_boolean_env = fn env_name, default ->
 
     _ ->
       default
+  end
+end
+
+parse_string_list_env = fn env_name, default ->
+  case System.get_env(env_name) do
+    nil ->
+      default
+
+    value ->
+      value
+      |> String.split(",", trim: true)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
   end
 end
 
@@ -86,6 +100,17 @@ config :men, Men.Gateway.SessionCoordinator,
 
 config :men, Men.Gateway.DispatchServer, bridge_adapter: runtime_bridge_impl
 
+config :men, :zcpg_cutover,
+  enabled: parse_boolean_env.("ZCPG_CUTOVER_ENABLED", false),
+  tenant_whitelist: parse_string_list_env.("ZCPG_CUTOVER_TENANT_WHITELIST", []),
+  env_override: parse_boolean_env.("ZCPG_CUTOVER_ENV_OVERRIDE", false),
+  timeout_ms: parse_positive_integer_env.("ZCPG_CUTOVER_TIMEOUT_MS", 8_000),
+  breaker: [
+    failure_threshold: parse_positive_integer_env.("ZCPG_CUTOVER_BREAKER_FAILURE_THRESHOLD", 5),
+    window_seconds: parse_positive_integer_env.("ZCPG_CUTOVER_BREAKER_WINDOW_SECONDS", 30),
+    cooldown_seconds: parse_positive_integer_env.("ZCPG_CUTOVER_BREAKER_COOLDOWN_SECONDS", 60)
+  ]
+
 gong_rpc_node_start_type =
   case System.get_env("GONG_RPC_NODE_START_TYPE") do
     "shortnames" -> :shortnames
@@ -100,6 +125,12 @@ config :men, Men.RuntimeBridge.GongRPC,
   rpc_timeout_ms: parse_positive_integer_env.("GONG_RPC_TIMEOUT_MS", 30_000),
   completion_timeout_ms: parse_positive_integer_env.("GONG_RPC_COMPLETION_TIMEOUT_MS", 60_000),
   model: System.get_env("GONG_RPC_MODEL") || "deepseek:deepseek-chat"
+
+config :men, Men.RuntimeBridge.ZcpgRPC,
+  base_url: System.get_env("ZCPG_RPC_BASE_URL") || "http://127.0.0.1:4015",
+  path: System.get_env("ZCPG_RPC_PATH") || "/v1/runtime/bridge/prompt",
+  token: System.get_env("ZCPG_RPC_TOKEN"),
+  timeout: parse_positive_integer_env.("ZCPG_RPC_TIMEOUT_MS", 30_000)
 
 # 钉钉机器人回发配置（支持 webhook 与 app_robot 两种模式）。
 dingtalk_mode =

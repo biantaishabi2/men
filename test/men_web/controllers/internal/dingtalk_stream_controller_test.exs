@@ -19,7 +19,7 @@ defmodule MenWeb.Internal.DingtalkStreamControllerTest do
            %{
              request_id: "req-stream",
              run_id: "run-stream",
-             payload: %{channel: "dingtalk", content: "from-stream"},
+             payload: %{channel: "dingtalk", content: "@bot from-stream"},
              channel: "dingtalk",
              user_id: "stream-user",
              group_id: "stream-chat"
@@ -84,7 +84,7 @@ defmodule MenWeb.Internal.DingtalkStreamControllerTest do
 
     assert_receive {:ingress_called, %{"mode" => "ok"}}
     assert_receive {:bridge_called, prompt, _context}
-    assert Jason.decode!(prompt) == %{"channel" => "dingtalk", "content" => "from-stream"}
+    assert Jason.decode!(prompt) == %{"channel" => "dingtalk", "content" => "@bot from-stream"}
   end
 
   test "缺少 token 返回 401", %{conn: conn} do

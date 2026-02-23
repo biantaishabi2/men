@@ -9,7 +9,8 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
   @default_window_seconds 300
 
   @impl true
-  def normalize(%{headers: headers, body: body} = request) when is_map(headers) and is_map(body) do
+  def normalize(%{headers: headers, body: body} = request)
+      when is_map(headers) and is_map(body) do
     with {:ok, secret} <- fetch_secret(),
          {:ok, timestamp} <- fetch_timestamp(headers),
          :ok <- verify_timestamp_window(timestamp, fetch_window_seconds()),
@@ -17,16 +18,26 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
          {:ok, raw_body} <- fetch_raw_body(request, body),
          :ok <- verify_signature(secret, timestamp, raw_body, signature),
          {:ok, event_type} <- fetch_required_binary(body, ["event_type", "type"], :event_type),
-         {:ok, sender_id} <- fetch_required_binary(body, ["sender_id", "senderId", "userid"], :sender_id),
+         {:ok, sender_id} <-
+           fetch_required_binary(body, ["sender_id", "senderId", "userid"], :sender_id),
          {:ok, conversation_id} <-
-           fetch_required_binary(body, ["conversation_id", "conversationId", "chat_id"], :conversation_id),
+           fetch_required_binary(
+             body,
+             ["conversation_id", "conversationId", "chat_id"],
+             :conversation_id
+           ),
          {:ok, content} <- fetch_required_binary(body, ["content", "text"], :content) do
+      mentioned = mentioned?(body, content)
+      tenant_id = fetch_optional_binary(body, ["tenant_id", "tenantId", "corpId"])
+
       standardized_payload = %{
         channel: @channel,
         event_type: event_type,
         sender_id: sender_id,
         conversation_id: conversation_id,
         content: content,
+        tenant_id: tenant_id,
+        mentioned: mentioned,
         raw_payload: body
       }
 
@@ -40,6 +51,9 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
           event_type: event_type,
           sender_id: sender_id,
           conversation_id: conversation_id,
+          tenant_id: tenant_id,
+          mention_required: true,
+          mentioned: mentioned,
           raw_payload: body,
           raw_body: raw_body
         }
@@ -176,6 +190,26 @@ defmodule Men.Channels.Ingress.DingtalkAdapter do
       {:ok, value}
     else
       invalid_field(field_name, "missing required field")
+    end
+  end
+
+  defp fetch_optional_binary(body, keys) do
+    keys
+    |> Enum.find_value(fn key ->
+      case Map.get(body, key) do
+        value when is_binary(value) and value != "" -> String.trim(value)
+        _ -> nil
+      end
+    end)
+  end
+
+  defp mentioned?(body, content) do
+    case Map.get(body, "is_at") || Map.get(body, "isAt") || Map.get(body, "mentioned") do
+      value when is_boolean(value) ->
+        value
+
+      _ ->
+        String.contains?(content, "@")
     end
   end
 

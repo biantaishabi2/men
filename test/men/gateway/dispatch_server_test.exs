@@ -307,12 +307,29 @@ defmodule Men.Gateway.DispatchServerTest do
     assert error_result.run_id == "run-heal-1"
     assert error_result.code == "session_not_found"
 
-    assert_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1"}}
+    assert_receive {:bridge_called, "session_not_found_once",
+                    %{run_id: "run-heal-1", session_key: runtime_session_id_1}}
+
     refute_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1"}}
 
     assert_receive {:egress_called, "feishu:u-heal", %ErrorMessage{} = message}
     assert message.code == "session_not_found"
     refute_receive {:egress_called, "feishu:u-heal", %FinalMessage{}}
+
+    followup_event = %{
+      request_id: "req-heal-2",
+      run_id: "run-heal-2",
+      payload: "hello",
+      channel: "feishu",
+      user_id: "u-heal"
+    }
+
+    assert {:ok, _result} = DispatchServer.dispatch(server, followup_event)
+
+    assert_receive {:bridge_called, "hello",
+                    %{run_id: "run-heal-2", session_key: runtime_session_id_2}}
+
+    assert runtime_session_id_1 != runtime_session_id_2
   end
 
   test "runtime_session_not_found 不重试" do
