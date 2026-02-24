@@ -34,6 +34,9 @@ defmodule Men.Ops.Policy.Source.Config do
   @impl true
   def upsert(_identity, _value, _opts), do: {:error, :readonly_source}
 
+  @impl true
+  def delete(_identity, _opts), do: {:error, :readonly_source}
+
   defp do_fetch(identity) do
     policies = Application.get_env(:men, :ops_policy, []) |> Keyword.get(:default_policies, %{})
 

@@ -23,6 +23,9 @@ defmodule Men.Ops.PolicyTest do
 
     @impl true
     def upsert(_identity, _value, _opts), do: {:error, :timeout}
+
+    @impl true
+    def delete(_identity, _opts), do: {:error, :timeout}
   end
 
   defmodule DBNotFoundSource do
@@ -39,6 +42,9 @@ defmodule Men.Ops.PolicyTest do
 
     @impl true
     def upsert(_identity, _value, _opts), do: {:error, :not_found}
+
+    @impl true
+    def delete(_identity, _opts), do: {:error, :not_found}
   end
 
   setup do
@@ -77,6 +83,20 @@ defmodule Men.Ops.PolicyTest do
     assert result.version == saved.version
     assert result.source in [:db, :ets]
     assert is_boolean(result.cache_hit)
+  end
+
+  test "删除策略后返回 not_found（无 config fallback）" do
+    identity = %{tenant: "t1", env: "prod", scope: "dispatch", policy_key: "acl_default_timeout"}
+
+    assert {:ok, saved} =
+             Policy.put(identity, %{"mode" => "strict", "allow" => ["u1"]}, updated_by: "tester")
+
+    assert saved.version >= 1
+
+    assert {:ok, deleted} = Policy.delete(identity, updated_by: "tester")
+    assert deleted.version > saved.version
+
+    assert {:error, {:policy_unavailable, :not_found, :not_found}} = Policy.get(identity)
   end
 
   test "db 故障 + ets 可用：回退 ets 缓存并标记 fallback" do

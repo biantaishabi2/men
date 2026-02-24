@@ -42,6 +42,19 @@ defmodule Men.Ops.Policy do
 
   def put(_identity, _value, _opts), do: {:error, :invalid_value}
 
+  @spec delete(identity() | keyword() | map(), keyword()) ::
+          {:ok, get_result()} | {:error, term()}
+  def delete(identity, opts \\ []) do
+    with {:ok, normalized} <- normalize_identity(identity),
+         {:ok, record} <- db_source().delete(normalized, opts),
+         :ok <- Cache.delete(normalized),
+         :ok <- Events.publish_changed(record.policy_version) do
+      result = build_result(record.value, record.policy_version, :db, false, nil)
+      emit_get_observability(normalized, result)
+      {:ok, result}
+    end
+  end
+
   defp do_get(identity, _opts) do
     case Cache.get(identity) do
       {:hit, entry} ->

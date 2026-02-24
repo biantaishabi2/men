@@ -25,4 +25,5 @@ defmodule Men.Ops.Policy.Source do
   @callback get_version() :: {:ok, non_neg_integer()} | {:error, term()}
   @callback list_since_version(non_neg_integer()) :: {:ok, [policy_record()]} | {:error, term()}
   @callback upsert(identity(), map(), keyword()) :: {:ok, policy_record()} | {:error, term()}
+  @callback delete(identity(), keyword()) :: {:ok, policy_record()} | {:error, term()}
 end
