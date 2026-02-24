@@ -296,18 +296,27 @@ defmodule Men.Gateway.OpsPolicyProvider do
   defp string_or_atom_map(_), do: %{}
 
   defp normalize_bootstrap(%{} = bootstrap) do
-    %{
-      acl: Map.get(bootstrap, :acl) || Map.get(bootstrap, "acl") || %{},
-      wake: Map.get(bootstrap, :wake) || Map.get(bootstrap, "wake") || %{},
-      dedup_ttl_ms:
-        Map.get(bootstrap, :dedup_ttl_ms) || Map.get(bootstrap, "dedup_ttl_ms") || 60_000,
-      version: Map.get(bootstrap, :version) || Map.get(bootstrap, "version") || 0,
-      policy_version:
-        Map.get(bootstrap, :policy_version) || Map.get(bootstrap, "policy_version") || "fallback"
-    }
+    %{}
+    |> put_if_present(bootstrap, :acl, :acl, "acl")
+    |> put_if_present(bootstrap, :wake, :wake, "wake")
+    |> put_if_present(bootstrap, :dedup_ttl_ms, :dedup_ttl_ms, "dedup_ttl_ms")
+    |> put_if_present(bootstrap, :version, :version, "version")
+    |> put_if_present(bootstrap, :policy_version, :policy_version, "policy_version")
   end
 
   defp normalize_bootstrap(_), do: %{}
+
+  # 仅合并显式配置，避免空 bootstrap 覆盖默认 fail-closed 基线策略。
+  defp put_if_present(acc, source, target_key, atom_key, string_key) do
+    value =
+      cond do
+        Map.has_key?(source, atom_key) -> Map.get(source, atom_key)
+        Map.has_key?(source, string_key) -> Map.get(source, string_key)
+        true -> :not_present
+      end
+
+    if value == :not_present, do: acc, else: Map.put(acc, target_key, value)
+  end
 
   defp normalize_positive_integer(value, _default) when is_integer(value) and value > 0, do: value
   defp normalize_positive_integer(_, default), do: default

@@ -88,4 +88,25 @@ defmodule Men.Gateway.OpsPolicyProviderTest do
     assert tenant_a.wake["must_wake"] == ["agent_result"]
     assert tenant_b.wake["must_wake"] == ["policy_changed"]
   end
+
+  test "未配置 bootstrap_policy 时 fallback 不应丢失默认 ACL" do
+    original_gateway = Application.get_env(:men, OpsPolicyProvider, [])
+
+    Application.put_env(:men, OpsPolicyProvider, cache_ttl_ms: 5)
+    OpsPolicyProvider.reset_cache()
+
+    on_exit(fn ->
+      Application.put_env(:men, OpsPolicyProvider, original_gateway)
+      OpsPolicyProvider.reset_cache()
+    end)
+
+    assert {:ok, policy} =
+             OpsPolicyProvider.get_policy(
+               identity: %{tenant: "tenant-missing", env: "prod", scope: "gateway"}
+             )
+
+    assert policy.policy_version == "fallback"
+    assert get_in(policy, [:acl, "child", "write"]) == ["agent.$agent_id.", "shared.evidence.agent.$agent_id.", "inbox."]
+    assert get_in(policy, [:acl, "system", "write"]) == [""]
+  end
 end
