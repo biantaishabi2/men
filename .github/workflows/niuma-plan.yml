@@ -11,10 +11,8 @@ permissions:
 jobs:
   plan-draft:
     if: github.event.label.name == 'bot:fix'
-    uses: biantaishabi2/Cli/.github/workflows/niuma-plan-reusable.yml@master
+    uses: ./.github/workflows/niuma-plan-reusable.yml
     with:
       repo: ${{ github.repository }}
-      workflow_source_repo: biantaishabi2/Cli
-      workflow_source_ref: master
       issue_number: ${{ format('{0}', github.event.issue.number) }}
     secrets: inherit

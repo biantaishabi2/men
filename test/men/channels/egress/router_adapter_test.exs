@@ -28,11 +28,17 @@ defmodule Men.Channels.Egress.RouterAdapterTest do
     original_card_cfg = Application.get_env(:men, DingtalkCardAdapter, [])
 
     Application.put_env(:men, :router_adapter_test_pid, self())
+
     Application.put_env(:men, DingtalkRobotAdapter,
       transport: MockTransport,
       webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=config-token"
     )
-    Application.put_env(:men, DingtalkCardAdapter, Keyword.put(original_card_cfg, :enabled, false))
+
+    Application.put_env(
+      :men,
+      DingtalkCardAdapter,
+      Keyword.put(original_card_cfg, :enabled, false)
+    )
 
     on_exit(fn ->
       Application.delete_env(:men, :router_adapter_test_pid)

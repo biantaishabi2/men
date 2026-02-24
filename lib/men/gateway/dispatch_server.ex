@@ -189,6 +189,7 @@ defmodule Men.Gateway.DispatchServer do
 
   defp run_with_route(state, context) do
     state = maybe_refresh_cutover_config(state)
+    log_feature_probe(context)
 
     with {:ok, prompt} <- payload_to_prompt(context.payload) do
       case Router.execute(state, context, prompt) do
@@ -234,20 +235,71 @@ defmodule Men.Gateway.DispatchServer do
           end
 
         {:error, error_payload, routing_state} ->
-          Logger.error("dispatch_server.run_dispatch.bridge_error",
-            request_id: context.request_id,
-            run_id: context.run_id,
-            type: Map.get(error_payload, :type),
-            code: Map.get(error_payload, :code),
-            message: Map.get(error_payload, :message),
-            details: Map.get(error_payload, :details),
-            error_payload:
-              inspect(error_payload, pretty: true, limit: :infinity, printable_limit: :infinity)
-          )
+          if retryable_session_not_found_code?(Map.get(error_payload, :code)) do
+            case Router.execute(routing_state, context, prompt) do
+              {:ok, bridge_payload, retry_state} ->
+                case do_send_final(retry_state, context, bridge_payload) do
+                  :ok ->
+                    new_state = mark_processed(retry_state, context)
+                    {{:ok, build_dispatch_result(context, bridge_payload)}, new_state}
 
-          error_payload = ensure_error_egress_result(routing_state, context, error_payload)
-          new_state = maybe_mark_processed(routing_state, context, error_payload)
-          {{:error, build_error_result(context, error_payload)}, new_state}
+                  {:egress_error, reason, context} ->
+                    retry_error_payload = %{
+                      type: :failed,
+                      code: "EGRESS_ERROR",
+                      message: "egress send failed",
+                      details: %{reason: inspect(reason)}
+                    }
+
+                    retry_error_payload =
+                      ensure_error_egress_result(retry_state, context, retry_error_payload)
+
+                    new_state = maybe_mark_processed(retry_state, context, retry_error_payload)
+                    {{:error, build_error_result(context, retry_error_payload)}, new_state}
+                end
+
+              {:error, retry_error_payload, retry_state} ->
+                Logger.error("dispatch_server.run_dispatch.bridge_error",
+                  request_id: context.request_id,
+                  run_id: context.run_id,
+                  type: Map.get(retry_error_payload, :type),
+                  code: Map.get(retry_error_payload, :code),
+                  message: Map.get(retry_error_payload, :message),
+                  details: Map.get(retry_error_payload, :details),
+                  error_payload:
+                    inspect(
+                      retry_error_payload,
+                      pretty: true,
+                      limit: :infinity,
+                      printable_limit: :infinity
+                    )
+                )
+
+                retry_error_payload =
+                  ensure_error_egress_result(retry_state, context, retry_error_payload)
+
+                new_state = maybe_mark_processed(retry_state, context, retry_error_payload)
+                {{:error, build_error_result(context, retry_error_payload)}, new_state}
+
+              {:ignore, retry_state} ->
+                {{:ok, :ignored}, retry_state}
+            end
+          else
+            Logger.error("dispatch_server.run_dispatch.bridge_error",
+              request_id: context.request_id,
+              run_id: context.run_id,
+              type: Map.get(error_payload, :type),
+              code: Map.get(error_payload, :code),
+              message: Map.get(error_payload, :message),
+              details: Map.get(error_payload, :details),
+              error_payload:
+                inspect(error_payload, pretty: true, limit: :infinity, printable_limit: :infinity)
+            )
+
+            error_payload = ensure_error_egress_result(routing_state, context, error_payload)
+            new_state = maybe_mark_processed(routing_state, context, error_payload)
+            {{:error, build_error_result(context, error_payload)}, new_state}
+          end
       end
     else
       {:error, reason} ->
@@ -261,6 +313,24 @@ defmodule Men.Gateway.DispatchServer do
         error_payload = ensure_error_egress_result(state, context, error_payload)
         {{:error, build_error_result(context, error_payload)}, state}
     end
+  end
+
+  # 运行时探针：明确输出当前主链路是否真正接入 #52 相关能力，
+  # 避免仅凭模块存在就误判“已启用”。
+  defp log_feature_probe(context) do
+    payload = %{
+      request_id: context.request_id,
+      run_id: context.run_id,
+      session_key: context.session_key,
+      coordinate_event_exported: function_exported?(__MODULE__, :coordinate_event, 3),
+      prompt_composer_loaded: Code.ensure_loaded?(Men.Gateway.PromptComposer),
+      frame_builder_loaded: Code.ensure_loaded?(Men.Gateway.FrameBuilder),
+      repl_store_loaded: Code.ensure_loaded?(Men.Gateway.ReplStore),
+      repl_acl_loaded: Code.ensure_loaded?(Men.Gateway.ReplACL),
+      wake_policy_loaded: Code.ensure_loaded?(Men.Gateway.WakePolicy)
+    }
+
+    Logger.info("dispatch_server.feature_probe #{Jason.encode!(payload)}")
   end
 
   defp summarize_event(%{} = inbound_event) do
@@ -300,6 +370,15 @@ defmodule Men.Gateway.DispatchServer do
         }
     end
   end
+
+  defp retryable_session_not_found_code?(code) when is_atom(code),
+    do: code in [:session_not_found, :runtime_session_not_found]
+
+  defp retryable_session_not_found_code?(code) when is_binary(code) do
+    String.downcase(String.trim(code)) in ["session_not_found", "runtime_session_not_found"]
+  end
+
+  defp retryable_session_not_found_code?(_), do: false
 
   defp normalize_event(%{} = inbound_event) do
     with {:ok, request_id} <- fetch_required_binary(inbound_event, :request_id),

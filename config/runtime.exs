@@ -100,7 +100,6 @@ config :men, Men.Gateway.SessionCoordinator,
 
 config :men, Men.Gateway.DispatchServer, bridge_adapter: runtime_bridge_impl
 
-config :men, :zcpg_cutover,
 qiwei_cutover_enabled =
   parse_boolean_env.(
     "QIWEI_CUTOVER_ENABLED",
@@ -137,6 +136,7 @@ config :men, :qiwei,
   idempotency_ttl_seconds: parse_positive_integer_env.("QIWEI_IDEMPOTENCY_TTL_SECONDS", 120),
   cutover_enabled: qiwei_cutover_enabled,
   cutover_tenant_whitelist: qiwei_cutover_whitelist
+
 gong_rpc_node_start_type =
   case System.get_env("GONG_RPC_NODE_START_TYPE") do
     "shortnames" -> :shortnames

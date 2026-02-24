@@ -102,7 +102,8 @@ defmodule Men.Channels.Ingress.FeishuAdapter do
   end
 
   defp validate_signature(headers, body, bot_id, config) do
-    with {:ok, timestamp} <- fetch_header(headers, "x-lark-request-timestamp", :missing_timestamp),
+    with {:ok, timestamp} <-
+           fetch_header(headers, "x-lark-request-timestamp", :missing_timestamp),
          {:ok, nonce} <- fetch_header(headers, "x-lark-nonce", :missing_nonce),
          {:ok, signature} <- fetch_header(headers, "x-lark-signature", :missing_signature),
          {:ok, timestamp_int} <- parse_timestamp(timestamp),
@@ -142,7 +143,9 @@ defmodule Men.Channels.Ingress.FeishuAdapter do
       :crypto.mac(:hmac, :sha256, secret, base)
       |> Base.encode64()
 
-    if Plug.Crypto.secure_compare(expected, signature), do: :ok, else: {:error, :invalid_signature}
+    if Plug.Crypto.secure_compare(expected, signature),
+      do: :ok,
+      else: {:error, :invalid_signature}
   end
 
   defp verify_replay(_timestamp, _nonce, _bot_id, %{sign_mode: :compat}), do: :ok
@@ -155,7 +158,9 @@ defmodule Men.Channels.Ingress.FeishuAdapter do
   end
 
   defp to_inbound_event(payload, bot_id, config) do
-    event_id = get_in(payload, ["header", "event_id"]) || payload["event_id"] || unique_request_id()
+    event_id =
+      get_in(payload, ["header", "event_id"]) || payload["event_id"] || unique_request_id()
+
     message = get_in(payload, ["event", "message"]) || %{}
     sender = get_in(payload, ["event", "sender"]) || %{}
 

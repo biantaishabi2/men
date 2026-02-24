@@ -43,7 +43,9 @@ defmodule Men.Dispatch.Router do
 
   defp execute_legacy(state, context, prompt) do
     case state.legacy_bridge_adapter.start_turn(prompt, bridge_context(context, state)) do
-      {:ok, payload} -> {:ok, payload, state}
+      {:ok, payload} ->
+        {:ok, payload, state}
+
       {:error, error_payload} ->
         state = maybe_invalidate_runtime_session(state, context, error_payload)
         {:error, error_payload, state}
@@ -121,6 +123,7 @@ defmodule Men.Dispatch.Router do
       request_id: request_id,
       session_key: runtime_session_id,
       external_session_key: context.session_key,
+      channel: Map.get(context, :channel),
       run_id: context.run_id,
       tenant_id: tenant_id,
       trace_id: request_id
@@ -167,9 +170,14 @@ defmodule Men.Dispatch.Router do
 
   defp invalidation_code(%{} = error_payload) do
     case Map.get(error_payload, :code) do
-      code when code in [:session_not_found, "session_not_found"] -> :session_not_found
-      code when code in [:runtime_session_not_found, "runtime_session_not_found"] -> :runtime_session_not_found
-      _ -> nil
+      code when code in [:session_not_found, "session_not_found"] ->
+        :session_not_found
+
+      code when code in [:runtime_session_not_found, "runtime_session_not_found"] ->
+        :runtime_session_not_found
+
+      _ ->
+        nil
     end
   end
 

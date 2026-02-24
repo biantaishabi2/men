@@ -51,7 +51,8 @@ defmodule Men.Channels.Egress.FeishuAdapter do
 
   @spec final_reply(map(), FinalMessage.t()) :: :ok | {:error, term()}
   def final_reply(target, %FinalMessage{} = message) do
-    with {:ok, request} <- build_request(target, final_payload(message.content), message.metadata),
+    with {:ok, request} <-
+           build_request(target, final_payload(message.content), message.metadata),
          :ok <- do_post(request) do
       :ok
     end

@@ -16,10 +16,50 @@ defmodule Men.Gateway.Types do
           optional(:session_key) => binary(),
           optional(:run_id) => binary(),
           optional(:metadata) => map(),
+          optional(:mode_signals) => map(),
           optional(:channel) => binary() | atom(),
           optional(:user_id) => binary() | atom() | integer(),
           optional(:group_id) => binary() | atom() | integer(),
           optional(:thread_id) => binary() | atom() | integer()
+        }
+
+  @typedoc """
+  事件 actor 身份：ACL 判定使用。
+  """
+  @type actor :: %{
+          required(:role) => :main | :child | :tool | :system,
+          required(:session_key) => binary(),
+          optional(:agent_id) => binary(),
+          optional(:tool_id) => binary()
+        }
+
+  @typedoc """
+  事件信封策略（Ops Policy 下发）。
+  """
+  @type policy :: %{
+          required(:acl) => map(),
+          required(:wake) => map(),
+          required(:dedup_ttl_ms) => pos_integer(),
+          required(:version) => non_neg_integer(),
+          required(:policy_version) => binary()
+        }
+
+  @typedoc """
+  网关事件信封规范。
+  """
+  @type envelope :: %{
+          required(:type) => binary(),
+          required(:source) => binary(),
+          required(:session_key) => binary(),
+          required(:event_id) => binary(),
+          required(:version) => non_neg_integer(),
+          required(:ets_keys) => [binary()],
+          required(:payload) => map(),
+          optional(:wake) => boolean() | nil,
+          optional(:inbox_only) => boolean() | nil,
+          optional(:target) => binary() | nil,
+          optional(:ts) => integer(),
+          optional(:meta) => map()
         }
 
   @typedoc """

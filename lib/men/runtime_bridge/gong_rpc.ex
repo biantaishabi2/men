@@ -48,7 +48,9 @@ defmodule Men.RuntimeBridge.GongRPC do
     rpc_client = Keyword.get(cfg, :rpc_client, ErlangRPCClient)
     connector = Keyword.get(cfg, :node_connector, NodeConnector)
     rpc_timeout_ms = timeout_ms(cfg, :rpc_timeout_ms, @default_rpc_timeout_ms)
-    completion_timeout_ms = timeout_ms(cfg, :completion_timeout_ms, @default_completion_timeout_ms)
+
+    completion_timeout_ms =
+      timeout_ms(cfg, :completion_timeout_ms, @default_completion_timeout_ms)
 
     request_id = context_value(context, :request_id, "unknown_request")
     session_key = context_value(context, :session_key, "unknown_session")
@@ -221,8 +223,27 @@ defmodule Men.RuntimeBridge.GongRPC do
          run_id,
          event_callback
        ) do
-    with :ok <- subscribe_session(gong_node, session_pid, rpc_client, rpc_timeout_ms, request_id, session_key, run_id),
-         :ok <- prompt_session(gong_node, session_pid, prompt, rpc_client, rpc_timeout_ms, request_id, session_key, run_id),
+    with :ok <-
+           subscribe_session(
+             gong_node,
+             session_pid,
+             rpc_client,
+             rpc_timeout_ms,
+             request_id,
+             session_key,
+             run_id
+           ),
+         :ok <-
+           prompt_session(
+             gong_node,
+             session_pid,
+             prompt,
+             rpc_client,
+             rpc_timeout_ms,
+             request_id,
+             session_key,
+             run_id
+           ),
          {:ok, text} <-
            await_completion(
              gong_node,
@@ -257,8 +278,25 @@ defmodule Men.RuntimeBridge.GongRPC do
 
         :error ->
           with {:ok, session_pid, session_id} <-
-                 create_session(gong_node, rpc_client, cfg, rpc_timeout_ms, request_id, session_key, run_id),
-               :ok <- subscribe_session(gong_node, session_pid, rpc_client, rpc_timeout_ms, request_id, session_key, run_id) do
+                 create_session(
+                   gong_node,
+                   rpc_client,
+                   cfg,
+                   rpc_timeout_ms,
+                   request_id,
+                   session_key,
+                   run_id
+                 ),
+               :ok <-
+                 subscribe_session(
+                   gong_node,
+                   session_pid,
+                   rpc_client,
+                   rpc_timeout_ms,
+                   request_id,
+                   session_key,
+                   run_id
+                 ) do
             entry = %{
               session_key: session_key,
               session_id: session_id,
@@ -267,7 +305,13 @@ defmodule Men.RuntimeBridge.GongRPC do
             }
 
             put_session_entry(entry)
-            Logger.info("gong_rpc.session.created", session_key: session_key, session_id: session_id, run_id: run_id)
+
+            Logger.info("gong_rpc.session.created",
+              session_key: session_key,
+              session_id: session_id,
+              run_id: run_id
+            )
+
             {:ok, entry, false}
           end
       end
@@ -275,7 +319,9 @@ defmodule Men.RuntimeBridge.GongRPC do
   end
 
   defp maybe_cleanup_sessions(gong_node, rpc_client, cfg, rpc_timeout_ms) do
-    interval_ms = timeout_ms(cfg, :session_cleanup_interval_ms, @default_session_cleanup_interval_ms)
+    interval_ms =
+      timeout_ms(cfg, :session_cleanup_interval_ms, @default_session_cleanup_interval_ms)
+
     current = now_ms()
     last = :persistent_term.get(@last_cleanup_key, 0)
 
@@ -347,7 +393,13 @@ defmodule Men.RuntimeBridge.GongRPC do
       :undefined ->
         heir_pid = Process.whereis(:init)
 
-        table_opts = [:named_table, :set, :public, read_concurrency: true, write_concurrency: true]
+        table_opts = [
+          :named_table,
+          :set,
+          :public,
+          read_concurrency: true,
+          write_concurrency: true
+        ]
 
         table_opts =
           if is_pid(heir_pid) do
@@ -388,7 +440,11 @@ defmodule Men.RuntimeBridge.GongRPC do
   defp put_session_entry(entry) do
     ensure_session_table!()
 
-    :ets.insert(@session_table, {entry.session_key, entry.session_id, entry.session_pid, entry.last_access_at_ms})
+    :ets.insert(
+      @session_table,
+      {entry.session_key, entry.session_id, entry.session_pid, entry.last_access_at_ms}
+    )
+
     :ok
   end
 
@@ -458,7 +514,13 @@ defmodule Men.RuntimeBridge.GongRPC do
     model = Keyword.get(cfg, :model, @default_model)
     session_opts = [[model: model]]
 
-    case rpc_client.call(gong_node, Gong.SessionManager, :create_session, session_opts, rpc_timeout_ms) do
+    case rpc_client.call(
+           gong_node,
+           Gong.SessionManager,
+           :create_session,
+           session_opts,
+           rpc_timeout_ms
+         ) do
       {:ok, pid, session_id} when is_pid(pid) and is_binary(session_id) ->
         {:ok, pid, session_id}
 
@@ -476,8 +538,22 @@ defmodule Men.RuntimeBridge.GongRPC do
     end
   end
 
-  defp subscribe_session(gong_node, session_pid, rpc_client, rpc_timeout_ms, request_id, session_key, run_id) do
-    case rpc_client.call(gong_node, Gong.Session, :subscribe, [session_pid, self()], rpc_timeout_ms) do
+  defp subscribe_session(
+         gong_node,
+         session_pid,
+         rpc_client,
+         rpc_timeout_ms,
+         request_id,
+         session_key,
+         run_id
+       ) do
+    case rpc_client.call(
+           gong_node,
+           Gong.Session,
+           :subscribe,
+           [session_pid, self()],
+           rpc_timeout_ms
+         ) do
       :ok ->
         :ok
 
@@ -495,8 +571,23 @@ defmodule Men.RuntimeBridge.GongRPC do
     end
   end
 
-  defp prompt_session(gong_node, session_pid, prompt, rpc_client, rpc_timeout_ms, request_id, session_key, run_id) do
-    case rpc_client.call(gong_node, Gong.Session, :prompt, [session_pid, prompt, []], rpc_timeout_ms) do
+  defp prompt_session(
+         gong_node,
+         session_pid,
+         prompt,
+         rpc_client,
+         rpc_timeout_ms,
+         request_id,
+         session_key,
+         run_id
+       ) do
+    case rpc_client.call(
+           gong_node,
+           Gong.Session,
+           :prompt,
+           [session_pid, prompt, []],
+           rpc_timeout_ms
+         ) do
       :ok ->
         :ok
 
@@ -504,7 +595,8 @@ defmodule Men.RuntimeBridge.GongRPC do
         {:error, rpc_error_payload("RPC_PROMPT_FAILED", reason)}
 
       {:error, reason} ->
-        {:error, failed_payload("RPC_PROMPT_FAILED", "session prompt failed", %{reason: inspect(reason)})}
+        {:error,
+         failed_payload("RPC_PROMPT_FAILED", "session prompt failed", %{reason: inspect(reason)})}
 
       other ->
         {:error,
@@ -708,7 +800,13 @@ defmodule Men.RuntimeBridge.GongRPC do
   defp fetch_history_text(gong_node, session_pid, rpc_client, rpc_timeout_ms) do
     case rpc_client.call(gong_node, Gong.Session, :history, [session_pid], rpc_timeout_ms) do
       {:ok, history} when is_list(history) ->
-        case rpc_client.call(gong_node, Gong.Session, :get_last_assistant_message, [history], rpc_timeout_ms) do
+        case rpc_client.call(
+               gong_node,
+               Gong.Session,
+               :get_last_assistant_message,
+               [history],
+               rpc_timeout_ms
+             ) do
           text when is_binary(text) and text != "" -> {:ok, text}
           _ -> {:ok, ""}
         end
@@ -717,12 +815,23 @@ defmodule Men.RuntimeBridge.GongRPC do
         {:error, rpc_error_payload("RPC_HISTORY_FAILED", reason)}
 
       other ->
-        {:error, failed_payload("RPC_HISTORY_FAILED", "unexpected history result", %{result: inspect(other)})}
+        {:error,
+         failed_payload("RPC_HISTORY_FAILED", "unexpected history result", %{
+           result: inspect(other)
+         })}
     end
   end
 
   defp safe_close_session(gong_node, session_id, rpc_client, rpc_timeout_ms) do
-    _ = rpc_client.call(gong_node, Gong.SessionManager, :close_session, [session_id], rpc_timeout_ms)
+    _ =
+      rpc_client.call(
+        gong_node,
+        Gong.SessionManager,
+        :close_session,
+        [session_id],
+        rpc_timeout_ms
+      )
+
     :ok
   end
 

@@ -11,10 +11,8 @@ permissions:
 jobs:
   review:
     if: github.event.label.name == 'bot:pr-created'
-    uses: biantaishabi2/Cli/.github/workflows/niuma-review-reusable.yml@master
+    uses: ./.github/workflows/niuma-review-reusable.yml
     with:
       repo: ${{ github.repository }}
-      workflow_source_repo: biantaishabi2/Cli
-      workflow_source_ref: master
       issue_number: ${{ format('{0}', github.event.issue.number) }}
     secrets: inherit

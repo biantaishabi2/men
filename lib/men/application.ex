@@ -14,7 +14,9 @@ defmodule Men.Application do
         {DNSCluster, query: Application.get_env(:men, :dns_cluster_query) || :ignore},
         {Phoenix.PubSub, name: Men.PubSub},
         # Start the Finch HTTP client for sending emails
-        {Finch, name: Men.Finch}
+        {Finch, name: Men.Finch},
+        Men.Ops.Policy.Cache,
+        Men.Ops.Policy.Sync
       ] ++
         gateway_children() ++
         [

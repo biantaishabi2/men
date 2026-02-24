@@ -33,7 +33,10 @@ defmodule Mix.Tasks.Men.Cutover do
     end
 
     action_count =
-      Enum.count([opts[:status], opts[:enable], opts[:disable], opts[:rollback], opts[:drill]], & &1) +
+      Enum.count(
+        [opts[:status], opts[:enable], opts[:disable], opts[:rollback], opts[:drill]],
+        & &1
+      ) +
         if(is_binary(opts[:set_whitelist]), do: 1, else: 0)
 
     cond do
@@ -57,7 +60,10 @@ defmodule Mix.Tasks.Men.Cutover do
         print_status()
 
       is_binary(opts[:set_whitelist]) ->
-        update_cfg(fn cfg -> Keyword.put(cfg, :tenant_whitelist, parse_tenant_csv(opts[:set_whitelist])) end)
+        update_cfg(fn cfg ->
+          Keyword.put(cfg, :tenant_whitelist, parse_tenant_csv(opts[:set_whitelist]))
+        end)
+
         Mix.shell().info("cutover whitelist updated")
         print_status()
 

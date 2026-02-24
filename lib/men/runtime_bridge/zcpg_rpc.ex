@@ -47,7 +47,6 @@ defmodule Men.RuntimeBridge.ZcpgRPC do
     defp normalize_timeout(_), do: @default_timeout_ms
   end
 
-  @impl true
   def prompt(%Request{} = request, opts \\ []) do
     started_at = System.monotonic_time(:millisecond)
 
