@@ -256,6 +256,13 @@ defmodule Men.Gateway.DispatchServer do
     {:noreply, new_state}
   end
 
+  @impl true
+  def handle_info({:session_event, event}, state) when is_map(event) do
+    event_type = Map.get(event, :type, Map.get(event, "type", "unknown"))
+    Logger.debug("dispatch_server.session_event_ignored type=#{inspect(event_type)}")
+    {:noreply, state}
+  end
+
   defp run_event_coordination(state, inbound_event, runtime_overrides) do
     with {:ok, envelope} <- EventEnvelope.normalize(inbound_event),
          {:ok, policy} <- load_runtime_policy(state, runtime_overrides),

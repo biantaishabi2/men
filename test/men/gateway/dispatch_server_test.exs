@@ -528,6 +528,24 @@ defmodule Men.Gateway.DispatchServerTest do
     assert message.content == "ok:slow"
   end
 
+  test "session_event 异步消息会被消费，不影响后续 dispatch" do
+    server = start_dispatch_server()
+
+    send(server, {:session_event, %{type: "lifecycle.turn_completed", payload: %{status: "ok"}}})
+    Process.sleep(20)
+
+    event = %{
+      request_id: "req-after-session-event-1",
+      payload: "hello",
+      channel: "feishu",
+      user_id: "u-session-event"
+    }
+
+    assert {:ok, result} = DispatchServer.dispatch(server, event)
+    assert result.request_id == "req-after-session-event-1"
+    assert_receive {:egress_called, "feishu:u-session-event", %FinalMessage{}}
+  end
+
   test "关键边界输入: 非法 request_id / metadata 非 map / 路由字段不足" do
     server = start_dispatch_server()
 
