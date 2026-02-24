@@ -66,7 +66,7 @@ defmodule Men.RuntimeBridge.Bridge do
   def prompt(%Request{} = request, opts \\ []) do
     adapter = resolve_adapter(opts)
 
-    if function_exported?(adapter, :prompt, 2) do
+    if adapter_exports?(adapter, :prompt, 2) do
       case adapter.prompt(request, opts) do
         {:ok, %Response{} = response} ->
           {:ok, response}
@@ -86,7 +86,7 @@ defmodule Men.RuntimeBridge.Bridge do
   def close(%Request{} = request, opts \\ []) do
     adapter = resolve_adapter(opts)
 
-    if function_exported?(adapter, :close, 2) do
+    if adapter_exports?(adapter, :close, 2) do
       case adapter.close(request, opts) do
         {:ok, %Response{} = response} ->
           {:ok, response}
@@ -124,7 +124,7 @@ defmodule Men.RuntimeBridge.Bridge do
           {:error, error_to_error_response(request, error)}
       end
     else
-      if function_exported?(adapter, :call, 2) do
+      if adapter_exports?(adapter, :call, 2) do
         adapter.call(request, opts)
       else
         {:error,
@@ -169,7 +169,7 @@ defmodule Men.RuntimeBridge.Bridge do
           {:error, error_to_legacy_payload(context, error)}
       end
     else
-      if function_exported?(adapter, :start_turn, 2) do
+      if adapter_exports?(adapter, :start_turn, 2) do
         adapter.start_turn(prompt, context)
       else
         {:error,
@@ -214,7 +214,7 @@ defmodule Men.RuntimeBridge.Bridge do
   defp invoke_atomic(fun, %Request{} = request, opts) do
     adapter = resolve_adapter(opts)
 
-    if function_exported?(adapter, fun, 2) do
+    if adapter_exports?(adapter, fun, 2) do
       apply(adapter, fun, [request, opts])
     else
       {:error, unsupported_error("adapter does not implement #{fun}/2")}
@@ -222,7 +222,7 @@ defmodule Men.RuntimeBridge.Bridge do
   end
 
   defp prompt_via_legacy(adapter, %Request{} = request, _opts) do
-    if function_exported?(adapter, :start_turn, 2) do
+    if adapter_exports?(adapter, :start_turn, 2) do
       prompt = normalize_prompt(request)
       context = request_to_context(request)
 
@@ -422,5 +422,12 @@ defmodule Men.RuntimeBridge.Bridge do
 
   defp generate_run_id do
     "run_" <> Integer.to_string(System.unique_integer([:positive, :monotonic]), 16)
+  end
+
+  defp adapter_exports?(adapter, fun, arity) when is_atom(adapter) do
+    case Code.ensure_loaded(adapter) do
+      {:module, _} -> function_exported?(adapter, fun, arity)
+      {:error, _} -> false
+    end
   end
 end
