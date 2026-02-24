@@ -1,7 +1,7 @@
 defmodule Men.Gateway.DispatchServerTest do
   use ExUnit.Case, async: false
 
-  alias Men.Channels.Egress.Messages.{ErrorMessage, EventMessage, FinalMessage}
+  alias Men.Channels.Egress.Messages.{ErrorMessage, FinalMessage}
   alias Men.Gateway.DispatchServer
   alias Men.Gateway.ReplStore
   alias Men.Gateway.SessionCoordinator
@@ -52,14 +52,6 @@ defmodule Men.Gateway.DispatchServerTest do
           Process.sleep(200)
           ok_payload(prompt, context)
 
-        prompt == "stream_delta" ->
-          emit_delta(context, "partial:stream_delta")
-          ok_payload(prompt, context)
-
-        prompt == "stream_tool_delta" ->
-          emit_tool_delta(context)
-          ok_payload(prompt, context)
-
         true ->
           ok_payload(prompt, context)
       end
@@ -76,25 +68,6 @@ defmodule Men.Gateway.DispatchServerTest do
     defp notify(message) do
       if pid = Application.get_env(:men, :dispatch_server_test_pid) do
         send(pid, message)
-      end
-
-      :ok
-    end
-
-    defp emit_delta(context, text) do
-      callback = Map.get(context, :event_callback)
-      if is_function(callback, 1), do: callback.(%{type: :delta, payload: %{text: text}})
-      :ok
-    end
-
-    defp emit_tool_delta(context) do
-      callback = Map.get(context, :event_callback)
-
-      if is_function(callback, 1) do
-        callback.(%{
-          type: :delta,
-          payload: %{text: "", tool_name: "list_directory", tool_status: "start"}
-        })
       end
 
       :ok
@@ -359,7 +332,7 @@ defmodule Men.Gateway.DispatchServerTest do
     assert runtime_session_id_1 == runtime_session_id_2
   end
 
-  test "session_not_found 当前语义：不重建重试，直接 error 回写" do
+  test "session_not_found 仅重建一次并重试一次成功" do
     coordinator_name = start_session_coordinator()
 
     server =
@@ -376,9 +349,8 @@ defmodule Men.Gateway.DispatchServerTest do
       user_id: "u-heal"
     }
 
-    assert {:error, error_result} = DispatchServer.dispatch(server, event)
-    assert error_result.run_id == "run-heal-1"
-    assert error_result.code == "session_not_found"
+    assert {:ok, result} = DispatchServer.dispatch(server, event)
+    assert result.run_id == "run-heal-1"
 
     assert_receive {:bridge_called, "session_not_found_once",
                     %{run_id: "run-heal-1", session_key: runtime_session_id_1}}
@@ -388,26 +360,9 @@ defmodule Men.Gateway.DispatchServerTest do
 
     assert runtime_session_id_1 != runtime_session_id_2
 
-    refute_receive {:bridge_called, "session_not_found_once", %{run_id: "run-heal-1"}}
-
-    assert_receive {:egress_called, "feishu:u-heal", %ErrorMessage{} = message}
-    assert message.code == "session_not_found"
+    assert_receive {:egress_called, "feishu:u-heal", %FinalMessage{}}
     refute_receive {:egress_called, "feishu:u-heal", %FinalMessage{}}
-
-    followup_event = %{
-      request_id: "req-heal-2",
-      run_id: "run-heal-2",
-      payload: "hello",
-      channel: "feishu",
-      user_id: "u-heal"
-    }
-
-    assert {:ok, _result} = DispatchServer.dispatch(server, followup_event)
-
-    assert_receive {:bridge_called, "hello",
-                    %{run_id: "run-heal-2", session_key: runtime_session_id_2}}
-
-    assert runtime_session_id_1 != runtime_session_id_2
+    refute_receive {:egress_called, "feishu:u-heal", %ErrorMessage{}}
   end
 
   test "runtime_session_not_found 不重试" do
@@ -436,8 +391,8 @@ defmodule Men.Gateway.DispatchServerTest do
     assert message.code == "runtime_session_not_found"
   end
 
-  test "当前语义下 duplicate 命中不会重新执行 runtime" do
-    server = start_dispatch_server()
+  test "run 终态缓存超过上限后淘汰最旧 run_id" do
+    server = start_dispatch_server(run_terminal_limit: 2)
 
     event_1 = %{
       request_id: "req-cache-1",
@@ -470,14 +425,14 @@ defmodule Men.Gateway.DispatchServerTest do
     assert {:ok, _} = DispatchServer.dispatch(server, event_3)
     assert_receive {:bridge_called, "cache-3", %{run_id: "run-cache-3"}}
 
-    assert {:ok, :duplicate} = DispatchServer.dispatch(server, event_2)
+    assert {:ok, _} = DispatchServer.dispatch(server, event_2)
     refute_receive {:bridge_called, "cache-2", %{run_id: "run-cache-2"}}
 
-    assert {:ok, :duplicate} = DispatchServer.dispatch(server, event_1)
-    refute_receive {:bridge_called, "cache-1", %{run_id: "run-cache-1"}}
+    assert {:ok, _} = DispatchServer.dispatch(server, event_1)
+    assert_receive {:bridge_called, "cache-1", %{run_id: "run-cache-1"}}
   end
 
-  test "run_id 幂等命中 duplicate 且不重复出站" do
+  test "run_id 幂等命中终态缓存且不重复出站" do
     server = start_dispatch_server()
 
     event = %{
@@ -492,11 +447,11 @@ defmodule Men.Gateway.DispatchServerTest do
     assert_receive {:bridge_called, "hello", %{run_id: "fixed-run-id"}}
     assert_receive {:egress_called, "feishu:u300", %FinalMessage{}}
 
-    assert {:ok, :duplicate} = DispatchServer.dispatch(server, event)
+    assert {:ok, second_result} = DispatchServer.dispatch(server, event)
+    assert second_result == first_result
     refute_receive {:bridge_called, "hello", %{run_id: "fixed-run-id"}}
     refute_receive {:egress_called, "feishu:u300", %FinalMessage{}}
     refute_receive {:egress_called, "feishu:u300", %ErrorMessage{}}
-    _ = first_result
   end
 
   test "egress 失败返回 EGRESS_ERROR 时不缓存终态，可同 run_id 恢复重试" do
@@ -522,12 +477,12 @@ defmodule Men.Gateway.DispatchServerTest do
     assert result.run_id == "retryable-run-id"
     assert_receive {:bridge_called, "hello", %{run_id: "retryable-run-id"}}
 
-    assert {:ok, :duplicate} = DispatchServer.dispatch(server, event)
+    assert {:ok, result_cached} = DispatchServer.dispatch(server, event)
+    assert result_cached == result
     refute_receive {:bridge_called, "hello", %{run_id: "retryable-run-id"}}
-    _ = result
   end
 
-  test "同 run_id 并发提交: 返回值为 {:ok, result} 与 {:ok, :duplicate}" do
+  test "同 run_id 并发提交: 只执行一次 runtime 与一次 egress" do
     server = start_dispatch_server()
 
     event = %{
@@ -544,8 +499,7 @@ defmodule Men.Gateway.DispatchServerTest do
       end
 
     results = Enum.map(tasks, &Task.await(&1, 2_000))
-    assert Enum.any?(results, &match?({:ok, %{run_id: "concurrent-run-id"}}, &1))
-    assert Enum.any?(results, &match?({:ok, :duplicate}, &1))
+    assert Enum.uniq(results) |> length() == 1
 
     assert_receive {:bridge_called, "hello", %{run_id: "concurrent-run-id"}}
     refute_receive {:bridge_called, "hello", %{run_id: "concurrent-run-id"}}
@@ -572,64 +526,6 @@ defmodule Men.Gateway.DispatchServerTest do
     assert_receive {:bridge_called, "slow", %{request_id: "req-async-1"}}, 1_000
     assert_receive {:egress_called, "feishu:u-async", %FinalMessage{} = message}, 1_000
     assert message.content == "ok:slow"
-  end
-
-  test "streaming_enabled 打开时会透传 delta 事件" do
-    server = start_dispatch_server(streaming_enabled: true)
-
-    event = %{
-      request_id: "req-stream-1",
-      run_id: "run-stream-1",
-      payload: "stream_delta",
-      channel: "feishu",
-      user_id: "u-stream"
-    }
-
-    assert {:ok, result} = DispatchServer.dispatch(server, event)
-    assert result.run_id == "run-stream-1"
-
-    assert_receive {:egress_called, "feishu:u-stream", %EventMessage{} = event_message}
-    assert event_message.event_type == :delta
-    assert event_message.payload == %{text: "partial:stream_delta"}
-    assert event_message.metadata.run_id == "run-stream-1"
-
-    assert_receive {:egress_called, "feishu:u-stream", %FinalMessage{} = final_message}
-    assert final_message.content == "ok:stream_delta"
-  end
-
-  test "streaming_enabled 打开时会透传工具 delta 结构字段" do
-    server = start_dispatch_server(streaming_enabled: true)
-
-    event = %{
-      request_id: "req-stream-tool-1",
-      run_id: "run-stream-tool-1",
-      payload: "stream_tool_delta",
-      channel: "feishu",
-      user_id: "u-stream-tool"
-    }
-
-    assert {:ok, result} = DispatchServer.dispatch(server, event)
-    assert result.run_id == "run-stream-tool-1"
-
-    assert_receive {:egress_called, "feishu:u-stream-tool", %EventMessage{} = event_message}
-    assert event_message.event_type == :delta
-    assert event_message.payload == %{text: "", tool_name: "list_directory", tool_status: "start"}
-    assert event_message.metadata.tool_name == "list_directory"
-    assert event_message.metadata.tool_status == "start"
-
-    assert_receive {:egress_called, "feishu:u-stream-tool", %FinalMessage{} = final_message}
-    assert final_message.content == "ok:stream_tool_delta"
-  end
-
-  test "接收到非关键 session_event 时兜底吞掉，不影响进程存活" do
-    server = start_dispatch_server()
-
-    send(server, {:session_event, %{type: "lifecycle.received", session_id: "session-x", seq: 1}})
-    Process.sleep(20)
-
-    assert Process.alive?(server)
-    refute_receive {:egress_called, _, _}
-    refute_receive {:bridge_called, _, _}
   end
 
   test "关键边界输入: 非法 request_id / metadata 非 map / 路由字段不足" do
