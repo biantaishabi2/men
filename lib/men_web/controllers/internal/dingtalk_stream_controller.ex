@@ -7,12 +7,13 @@ defmodule MenWeb.Internal.DingtalkStreamController do
 
   alias Men.Channels.Ingress.DingtalkStreamAdapter
   alias Men.Gateway.DispatchServer
+  alias MenWeb.InternalAuth
 
   def create(conn, params) do
     ingress_adapter = Keyword.get(config(), :ingress_adapter, DingtalkStreamAdapter)
     dispatch_server = Keyword.get(config(), :dispatch_server, DispatchServer)
 
-    with :ok <- authorize(conn),
+    with :ok <- InternalAuth.authorize(conn, config: config()),
          {:ok, inbound_event} <- ingress_adapter.normalize(params),
          :ok <- DispatchServer.enqueue(dispatch_server, inbound_event) do
       conn
@@ -69,50 +70,6 @@ defmodule MenWeb.Internal.DingtalkStreamController do
           code: "INVALID_REQUEST",
           message: inspect(reason)
         })
-    end
-  end
-
-  defp authorize(conn) do
-    with {:ok, expected_token} <- fetch_expected_token(),
-         {:ok, presented_token} <- fetch_presented_token(conn),
-         true <- Plug.Crypto.secure_compare(expected_token, presented_token) do
-      :ok
-    else
-      {:error, reason} -> {:error, reason}
-      false -> {:error, :unauthorized}
-    end
-  end
-
-  defp fetch_expected_token do
-    token =
-      Keyword.get(config(), :internal_token) ||
-        System.get_env("DINGTALK_STREAM_INTERNAL_TOKEN")
-
-    if is_binary(token) and token != "" do
-      {:ok, token}
-    else
-      {:error, :missing_internal_token}
-    end
-  end
-
-  defp fetch_presented_token(conn) do
-    from_header = List.first(get_req_header(conn, "x-men-internal-token"))
-
-    token =
-      from_header ||
-        bearer_token(conn)
-
-    if is_binary(token) and token != "" do
-      {:ok, token}
-    else
-      {:error, :unauthorized}
-    end
-  end
-
-  defp bearer_token(conn) do
-    case List.first(get_req_header(conn, "authorization")) do
-      "Bearer " <> token when is_binary(token) and token != "" -> token
-      _ -> nil
     end
   end
 

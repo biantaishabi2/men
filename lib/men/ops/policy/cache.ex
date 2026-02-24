@@ -113,6 +113,18 @@ defmodule Men.Ops.Policy.Cache do
     :ok
   end
 
+  @spec delete(identity()) :: :ok | {:error, term()}
+  def delete(identity) do
+    with {:ok, key} <- normalize_identity(identity),
+         true <- ensure_tables() do
+      :ets.delete(@table, key)
+      :ok
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :cache_unavailable}
+    end
+  end
+
   @spec table_name() :: atom()
   def table_name, do: @table
 

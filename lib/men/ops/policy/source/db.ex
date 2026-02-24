@@ -127,6 +127,51 @@ defmodule Men.Ops.Policy.Source.DB do
 
   def upsert(_identity, _value, _opts), do: {:error, :invalid_value}
 
+  @impl true
+  @spec delete(identity() | keyword() | map(), keyword()) ::
+          {:ok, policy_record()} | {:error, term()}
+  def delete(identity, opts \\ []) do
+    with {:ok, normalized} <- normalize_identity(identity),
+         updated_by when is_binary(updated_by) and updated_by != "" <-
+           Keyword.get(opts, :updated_by, "system") do
+      sql = """
+      UPDATE ops_policies
+      SET deleted_at = timezone('utc', now()),
+          policy_version = nextval('ops_policy_version_seq'),
+          updated_by = $5,
+          updated_at = timezone('utc', now())
+      WHERE tenant = $1
+        AND env = $2
+        AND scope = $3
+        AND policy_key = $4
+        AND deleted_at IS NULL
+      RETURNING tenant, env, scope, policy_key, value, policy_version, updated_by, updated_at
+      """
+
+      case Ecto.Adapters.SQL.query(Repo, sql, [
+             normalized.tenant,
+             normalized.env,
+             normalized.scope,
+             normalized.policy_key,
+             updated_by
+           ]) do
+        {:ok, %{rows: [row]}} ->
+          {:ok, row_to_record(row)}
+
+        {:ok, %{rows: []}} ->
+          {:error, :not_found}
+
+        {:ok, _} ->
+          {:error, :empty_result}
+
+        {:error, reason} ->
+          {:error, {:db_error, reason}}
+      end
+    else
+      _ -> {:error, :invalid_updated_by}
+    end
+  end
+
   defp normalize_identity(%{tenant: tenant, env: env, scope: scope, policy_key: key}) do
     do_normalize_identity(tenant, env, scope, key)
   end
