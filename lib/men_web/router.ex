@@ -25,6 +25,8 @@ defmodule MenWeb.Router do
 
     post "/feishu", FeishuController, :create
     post "/dingtalk", DingtalkController, :callback
+    get "/qiwei", QiweiController, :verify
+    post "/qiwei", QiweiController, :callback
   end
 
   scope "/internal", MenWeb.Internal do
