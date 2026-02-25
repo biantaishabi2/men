@@ -136,11 +136,33 @@ run_with_log_tail() {
 # 网络瞬时抖动时做重试；重试前清理可能的半拉取状态，避免污染后续尝试。
 deps_get_ok=0
 max_attempts=3
+deps_get_timeout_seconds=180
+
+# 清理历史遗留目录，避免旧的 git 依赖状态污染本次解析。
+rm -rf deps/heroicons _build/test/lib/heroicons
 
 for attempt in $(seq 1 "$max_attempts"); do
-  if run_with_log_tail mix deps.get --only test --check-locked; then
+  if command -v timeout >/dev/null 2>&1; then
+    if run_with_log_tail timeout --signal=TERM --kill-after=30 "${deps_get_timeout_seconds}" \
+      mix deps.get --only test --check-locked; then
+      deps_get_status=0
+    else
+      deps_get_status=$?
+    fi
+  else
+    if run_with_log_tail mix deps.get --only test --check-locked; then
+      deps_get_status=0
+    else
+      deps_get_status=$?
+    fi
+  fi
+  if [ "$deps_get_status" -eq 0 ]; then
     deps_get_ok=1
     break
+  fi
+
+  if [ "$deps_get_status" -eq 124 ]; then
+    echo "deps.get timed out on attempt ${attempt}/${max_attempts} after ${deps_get_timeout_seconds}s"
   fi
 
   if [ "$attempt" -lt "$max_attempts" ]; then
