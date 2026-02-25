@@ -113,11 +113,17 @@ jobs:
           REPO: ${{ inputs.repo }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
-          "$NIUMA_BIN" state-label set \
+          # 先尝试严格迁移，若状态已提前变化则回退到幂等兜底迁移。
+          if ! "$NIUMA_BIN" state-label set \
             --repo "$REPO" \
             --issue "$ISSUE_NUMBER" \
             --from bot:pr-created \
-            --to bot:pr-needs-fix
+            --to bot:pr-needs-fix; then
+            "$NIUMA_BIN" state-label set \
+              --repo "$REPO" \
+              --issue "$ISSUE_NUMBER" \
+              --to bot:pr-needs-fix
+          fi
 
       - name: AI Self-Review
         if: steps.find_pr.outputs.pr_number != '' && steps.pr_gate.outcome == 'success'
