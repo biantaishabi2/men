@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-**Men** 是一个 **Gateway + Webhook 集成框架**，用于接收来自多个消息平台（钉钉、飞书）的事件，经过运行时执行（gong CLI），再将结果回写到对应的平台。
+**Men** 是一个 **Gateway + Webhook 集成框架**，用于接收来自多个消息平台（钉钉、飞书、企微）的事件，经过运行时执行（GongCLI/GongRPC/ZCPG RPC），再将结果回写到对应的平台。
 
 核心职责：**入站验证 → 运行时桥接 → 出站适配**
 
@@ -10,9 +10,10 @@
 
 ## 代码统计
 
-- **总代码行数（lib/）**: 3,047 行
-- **核心模块数**: 33 个 `.ex` 文件
+- **总代码行数（lib/，Elixir code）**: 12,199 行
+- **核心模块数**: 91 个 `.ex/.exs` 文件
 - **技术栈**: Phoenix 1.7.21 + Ecto + Plug
+- **统计口径**: `cloc lib --json --quiet`（2026-02-25）
 
 ---
 
@@ -26,9 +27,11 @@ lib/men_web/
 ├── router.ex                          # 路由定义
 │   └── POST /webhooks/dingtalk        → DingtalkController.callback
 │   └── POST /webhooks/feishu          → FeishuController.create
+│   └── GET/POST /webhooks/qiwei       → QiweiController.verify/callback
 ├── controllers/
 │   ├── webhooks/dingtalk_controller.ex    # 钉钉 webhook 处理
 │   ├── webhooks/feishu_controller.ex      # 飞书 webhook 处理
+│   ├── webhooks/qiwei_controller.ex       # 企微 callback 处理
 │   └── page_controller.ex
 ├── plugs/
 │   └── raw_body_reader.ex             # 缓存原始 body（用于签名验证）

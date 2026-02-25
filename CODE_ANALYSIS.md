@@ -2,9 +2,9 @@
 
 ## 项目一句话定位
 
-**Men** = 多平台 Webhook 网关 + Gong CLI 运行时桥接框架
+**Men** = 多平台 Webhook 网关 + 多运行时桥接框架（GongCLI/GongRPC/ZCPG RPC）
 
-接收钉钉/飞书消息事件 → 验签 + 标准化 → 调度执行 → 超时控制 → 结果回写
+接收钉钉/飞书/企微消息事件 → 验签 + 标准化 → 调度执行 → 超时控制 → 结果回写
 
 ## 完整分析导航
 
@@ -21,11 +21,12 @@
 
 ### 代码统计
 
-- **总行数**: 3,047（lib/ 目录）
-- **模块数**: 33 个 .ex 文件
+- **总行数**: 12,199（lib/ 目录，Elixir code）
+- **模块数**: 91 个 .ex/.exs 文件
 - **技术栈**: Phoenix 1.7.21 + Ecto + Plug
-- **支持平台**: 钉钉（DingTalk）、飞书（Feishu）
+- **支持平台**: 钉钉（DingTalk）、飞书（Feishu）、企微（Qiwei）
 - **开发语言**: Elixir
+- **统计口径**: `cloc lib --json --quiet`（2026-02-25）
 
 ### 架构分层（6 层）
 
@@ -82,7 +83,7 @@ Layer 6: HTTP 响应           (Webhook Response)
 ### Gateway 层 (核心编排)
 
 ```
-lib/men/gateway/dispatch_server.ex (410 行)
+lib/men/gateway/dispatch_server.ex (1,149 行 code)
 ├─ dispatch/1        入口函数
 ├─ normalize_event/1  事件标准化 + 验证
 ├─ ensure_not_duplicate/1  run_id 去重
@@ -101,7 +102,7 @@ lib/men/gateway/dispatch_server.ex (410 行)
 ### 运行时桥接 (GongCLI)
 
 ```
-lib/men/runtime_bridge/gong_cli.ex (680 行)
+lib/men/runtime_bridge/gong_cli.ex (381 行 code)
 ├─ start_turn/2           入口：执行 gong CLI
 ├─ run_port_command/4     Port 启动 + 等待
 ├─ acquire_slot/2         并发计数 (+1)
@@ -122,13 +123,13 @@ lib/men/runtime_bridge/gong_cli.ex (680 行)
 ### 入站适配 (验证 + 标准化)
 
 ```
-钉钉 (DingtalkIngress - 260 行)
+钉钉 (DingtalkIngress - 208 行 code)
 ├─ normalize/1
 ├─ verify_signature()     HMAC-SHA256(secret, timestamp + body)
 ├─ verify_timestamp_window()  time(now) - time(header) <= 300s
 └─ 字段提取: sender_id, conversation_id, content
 
-飞书 (FeishuIngress - 420 行)
+飞书 (FeishuIngress - 239 行 code)
 ├─ normalize/1
 ├─ verify_signature()     SHA256(timestamp + nonce + secret)
 ├─ verify_timestamp_window()  300s 或 900s（可配）
@@ -321,13 +322,15 @@ lib/
     ├── repo.ex                      # Ecto Repo
     ├── mailer.ex                    # Swoosh 邮件
     ├── gateway/
-    │   ├── dispatch_server.ex       # 主状态机 410 行
+    │   ├── dispatch_server.ex       # 主状态机 1,149 行 code
     │   └── types.ex                 # 类型定义
     ├── channels/
     │   ├── ingress/
     │   │   ├── adapter.ex           # 接口契约
-    │   │   ├── dingtalk_adapter.ex  # 钉钉验签+标准化 260 行
-    │   │   ├── feishu_adapter.ex    # 飞书验签+标准化+重放 420 行
+    │   │   ├── dingtalk_adapter.ex  # 钉钉验签+标准化 208 行 code
+    │   │   ├── feishu_adapter.ex    # 飞书验签+标准化+重放 239 行 code
+    │   │   ├── qiwei_adapter.ex     # 企微验签+标准化
+    │   │   ├── qiwei_idempotency.ex # 企微回调幂等处理
     │   │   └── event.ex             # 事件结构
     │   └── egress/
     │       ├── adapter.ex           # 接口契约
@@ -338,7 +341,9 @@ lib/
     │   └── session_key.ex           # 会话键生成规则
     └── runtime_bridge/
         ├── bridge.ex                # 适配器接口
-        ├── gong_cli.ex              # GongCLI 实现 680 行
+        ├── gong_cli.ex              # GongCLI 实现 381 行 code
+        ├── gong_rpc.ex              # GongRPC 实现
+        ├── zcpg_rpc.ex              # ZCPG RPC 实现
         ├── request.ex               # 请求结构
         └── response.ex              # 响应结构
 

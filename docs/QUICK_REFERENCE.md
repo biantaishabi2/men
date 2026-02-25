@@ -2,13 +2,13 @@
 
 ## 一句话定位
 
-**Men** = 多平台 Webhook Gateway + Gong CLI 运行时桥接框架
+**Men** = 多平台 Webhook Gateway + 多运行时桥接框架（GongCLI/GongRPC/ZCPG RPC）
 
 ## 核心流程（5 步）
 
 ```
 1. HTTP 入站
-   POST /webhooks/{dingtalk|feishu}
+   POST /webhooks/{dingtalk|feishu|qiwei}
    ↓
 2. 入站验证（Ingress）
    签名校验 + 时间窗检查 + 重放防护 → 标准化事件
@@ -16,8 +16,8 @@
 3. Gateway 调度（DispatchServer）
    事件标准化 + 去重检查 + 运行时调用 + 结果回写
    ↓
-4. 运行时执行（GongCLI）
-   Port 子进程 + 超时控制 + 并发限制 + 清理机制
+4. 运行时执行（Runtime Bridge）
+   GongCLI/GongRPC/ZCPG RPC + 超时控制 + 并发限制 + 清理机制
    ↓
 5. 出站回写（Egress）
    结果 → 渠道发送接口（钉钉/飞书）
@@ -27,12 +27,14 @@
 
 | 指标 | 值 |
 |------|-----|
-| 总代码行数 | 3,047 |
-| Elixir 文件数 | 33 |
+| 总代码行数（lib/，Elixir code） | 12,199 |
+| Elixir 文件数（.ex/.exs） | 91 |
 | 超时默认值 | 30 秒 |
 | 最大并发数 | 10 |
 | 时间窗（钉钉） | 5 分钟 |
-| 支持平台 | 钉钉、飞书 |
+| 支持平台 | 钉钉、飞书、企微 |
+
+统计口径：`cloc lib --json --quiet`（2026-02-25）
 
 ## 模块职责速查
 
