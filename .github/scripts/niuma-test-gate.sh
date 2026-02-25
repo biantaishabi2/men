@@ -138,8 +138,10 @@ deps_get_ok=0
 max_attempts=3
 deps_get_timeout_seconds=600
 
-# 清理历史遗留目录，避免旧的 git 依赖状态污染本次解析。
-rm -rf deps/heroicons _build/test/lib/heroicons
+# 仅清理图标相关 git 依赖残留，避免误删全部 deps 导致重试成本过高。
+cleanup_heroicons_artifacts() {
+  rm -rf deps/heroicons _build/test/lib/heroicons
+}
 
 for attempt in $(seq 1 "$max_attempts"); do
   log "deps.get attempt=${attempt}/${max_attempts} timeout=${deps_get_timeout_seconds}s"
@@ -168,8 +170,8 @@ for attempt in $(seq 1 "$max_attempts"); do
 
   if [ "$attempt" -lt "$max_attempts" ]; then
     sleep_seconds=$((attempt * 3))
-    echo "deps.get failed on attempt ${attempt}/${max_attempts}; cleaning deps and retrying in ${sleep_seconds}s..."
-    rm -rf deps _build/test
+    echo "deps.get failed on attempt ${attempt}/${max_attempts}; cleaning heroicons artifacts and retrying in ${sleep_seconds}s..."
+    cleanup_heroicons_artifacts
     sleep "$sleep_seconds"
   fi
 done
