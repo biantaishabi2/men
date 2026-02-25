@@ -62,6 +62,23 @@ defmodule Men.Gateway.TypesTest do
              })
   end
 
+  test "未命中幂等时返回 idempotent_hit=false" do
+    task = %{
+      task_id: "task-1",
+      schedule_type: :at,
+      max_retries: 2,
+      timeout_ms: 30_000
+    }
+
+    assert {:ok, %{idempotent_hit: false}} =
+             Types.resolve_idempotent_request(task, %{
+               task_id: "task-2",
+               schedule_type: :at,
+               max_retries: 2,
+               timeout_ms: 30_000
+             })
+  end
+
   test "超时与执行失败都可重试且重试耗尽后落 TASK_RETRY_EXHAUSTED" do
     assert Types.retryable_error_code?("TASK_TIMEOUT")
     assert Types.retryable_error_code?("TASK_EXECUTION_FAILED")

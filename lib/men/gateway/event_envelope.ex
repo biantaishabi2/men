@@ -76,7 +76,7 @@ defmodule Men.Gateway.EventEnvelope do
          {:ok, wake} <- fetch_optional_boolean(Map.get(normalized, "wake"), :wake),
          {:ok, inbox_only} <-
            fetch_optional_boolean(Map.get(normalized, "inbox_only"), :inbox_only),
-         {:ok, target} <- fetch_optional_text(Map.get(normalized, "target")),
+         {:ok, target} <- fetch_optional_text(Map.get(normalized, "target"), :target),
          {:ok, ts} <- fetch_timestamp(Map.get(normalized, "ts")),
          {:ok, meta} <- fetch_meta(Map.get(normalized, "meta")) do
       {:ok,
@@ -158,14 +158,14 @@ defmodule Men.Gateway.EventEnvelope do
     end
   end
 
-  defp fetch_optional_text(nil), do: {:ok, nil}
+  defp fetch_optional_text(nil, _field), do: {:ok, nil}
 
-  defp fetch_optional_text(value) when is_binary(value) do
+  defp fetch_optional_text(value, _field) when is_binary(value) do
     trimmed = String.trim(value)
     if trimmed == "", do: {:ok, nil}, else: {:ok, trimmed}
   end
 
-  defp fetch_optional_text(_), do: {:error, {:invalid_field, :target}}
+  defp fetch_optional_text(_, field), do: {:error, {:invalid_field, field}}
 
   defp fetch_version(nil), do: {:ok, 0}
   defp fetch_version(value) when is_integer(value) and value >= 0, do: {:ok, value}
@@ -220,8 +220,9 @@ defmodule Men.Gateway.EventEnvelope do
          :ok <- validate_task_transition(from_state, to_state),
          {:ok, occurred_at} <- fetch_occurred_at(normalized["occurred_at"]),
          {:ok, attempt} <- fetch_optional_positive_integer(normalized["attempt"], :attempt),
-         {:ok, reason_code} <- fetch_optional_text(normalized["reason_code"]),
-         {:ok, reason_message} <- fetch_optional_text(normalized["reason_message"]),
+         {:ok, reason_code} <- fetch_optional_text(normalized["reason_code"], :reason_code),
+         {:ok, reason_message} <-
+           fetch_optional_text(normalized["reason_message"], :reason_message),
          {:ok, idempotent_hit} <-
            fetch_optional_boolean(normalized["idempotent_hit"], :idempotent_hit) do
       payload =

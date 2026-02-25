@@ -129,4 +129,38 @@ defmodule Men.Gateway.EventEnvelopeTest do
                }
              })
   end
+
+  test "任务状态事件 reason_code 非法类型返回 :reason_code" do
+    assert {:error, {:invalid_field, :reason_code}} =
+             EventEnvelope.normalize_task_state_event(%{
+               type: "task_state_changed",
+               source: "gateway.scheduler",
+               session_key: "scheduler:default",
+               event_id: "evt-task-reason-code-invalid",
+               payload: %{
+                 task_id: "task-1",
+                 from_state: "pending",
+                 to_state: "ready",
+                 occurred_at: "2026-02-25T03:42:00Z",
+                 reason_code: 123
+               }
+             })
+  end
+
+  test "任务状态事件 reason_message 非法类型返回 :reason_message" do
+    assert {:error, {:invalid_field, :reason_message}} =
+             EventEnvelope.normalize_task_state_event(%{
+               type: "task_state_changed",
+               source: "gateway.scheduler",
+               session_key: "scheduler:default",
+               event_id: "evt-task-reason-message-invalid",
+               payload: %{
+                 task_id: "task-1",
+                 from_state: "pending",
+                 to_state: "ready",
+                 occurred_at: "2026-02-25T03:42:00Z",
+                 reason_message: 123
+               }
+             })
+  end
 end
