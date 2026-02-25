@@ -138,17 +138,19 @@ deps_get_ok=0
 max_attempts=3
 deps_get_timeout_seconds=600
 
-# 仅清理图标相关依赖残留，兼容 heroicons 与 heroicons_css 两种来源。
-cleanup_icon_artifacts() {
+# 清理依赖目录与 Mix 清单缓存，避免 runner 复用旧依赖解析状态。
+cleanup_dependency_artifacts() {
   rm -rf \
     deps/heroicons \
     deps/heroicons_css \
+    deps/.mix \
     _build/test/lib/heroicons \
-    _build/test/lib/heroicons_css
+    _build/test/lib/heroicons_css \
+    _build/test/lib/*/.mix
 }
 
 # 首次尝试前先清理一次，避免 runner 缓存里的半拉取状态影响首轮结果。
-cleanup_icon_artifacts
+cleanup_dependency_artifacts
 
 for attempt in $(seq 1 "$max_attempts"); do
   log "deps.get attempt=${attempt}/${max_attempts} timeout=${deps_get_timeout_seconds}s"
@@ -177,8 +179,8 @@ for attempt in $(seq 1 "$max_attempts"); do
 
   if [ "$attempt" -lt "$max_attempts" ]; then
     sleep_seconds=$((attempt * 3))
-    echo "deps.get failed on attempt ${attempt}/${max_attempts}; cleaning icon artifacts and retrying in ${sleep_seconds}s..."
-    cleanup_icon_artifacts
+    echo "deps.get failed on attempt ${attempt}/${max_attempts}; cleaning dependency artifacts and retrying in ${sleep_seconds}s..."
+    cleanup_dependency_artifacts
     sleep "$sleep_seconds"
   fi
 done
