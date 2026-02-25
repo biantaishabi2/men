@@ -32,18 +32,38 @@ defmodule Men.Application do
     Supervisor.start_link(children, opts)
   end
 
-  defp gateway_children do
+  @doc false
+  def gateway_children do
     coordinator_enabled? =
       Application.get_env(:men, Men.Gateway.SessionCoordinator, [])
       |> Keyword.get(:enabled, true)
 
-    if coordinator_enabled? do
-      [
-        {Men.Gateway.SessionCoordinator, []},
-        {Men.Gateway.DispatchServer, []}
-      ]
+    scheduler_enabled? = Application.get_env(:men, :gateway_scheduler_enabled, false)
+
+    gateway_children(coordinator_enabled?, scheduler_enabled?)
+  end
+
+  @doc false
+  def gateway_children(coordinator_enabled?, scheduler_enabled?)
+      when is_boolean(coordinator_enabled?) and is_boolean(scheduler_enabled?) do
+    base_children =
+      if coordinator_enabled? do
+        [
+          {Men.Gateway.SessionCoordinator, []},
+          {Men.Gateway.DispatchServer, []}
+        ]
+      else
+        [{Men.Gateway.DispatchServer, []}]
+      end
+
+    if scheduler_enabled? do
+      base_children ++
+        [
+          {Men.Gateway.TaskDispatcher, []},
+          {Men.Gateway.TaskScheduler, []}
+        ]
     else
-      [{Men.Gateway.DispatchServer, []}]
+      base_children
     end
   end
 
