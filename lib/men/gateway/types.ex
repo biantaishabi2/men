@@ -283,27 +283,32 @@ defmodule Men.Gateway.Types do
   end
 
   @spec resolve_idempotent_request(task_snapshot() | map(), map(), keyword()) ::
-          {:ok, %{task: task_snapshot() | map(), idempotent_hit: true}}
+          {:ok, %{idempotent_hit: false}}
+          | {:ok, %{task: task_snapshot() | map(), idempotent_hit: true}}
           | {:error, task_duplicate_error()}
   def resolve_idempotent_request(existing_task, request, opts \\ [])
       when is_map(existing_task) and is_map(request) do
-    critical_fields = Keyword.get(opts, :critical_fields, @idempotency_critical_fields)
+    if idempotent_hit?(existing_task, request) do
+      critical_fields = Keyword.get(opts, :critical_fields, @idempotency_critical_fields)
 
-    conflict_fields =
-      critical_fields
-      |> Enum.filter(&Map.has_key?(request, &1))
-      |> Enum.reject(&(Map.get(existing_task, &1) == Map.get(request, &1)))
+      conflict_fields =
+        critical_fields
+        |> Enum.filter(&Map.has_key?(request, &1))
+        |> Enum.reject(&(Map.get(existing_task, &1) == Map.get(request, &1)))
 
-    if conflict_fields == [] do
-      {:ok, %{task: existing_task, idempotent_hit: true}}
+      if conflict_fields == [] do
+        {:ok, %{task: existing_task, idempotent_hit: true}}
+      else
+        {:error,
+         %{
+           code: "TASK_DUPLICATE",
+           reason: "idempotency key matched but critical fields conflicted",
+           conflict_fields: conflict_fields,
+           task: existing_task
+         }}
+      end
     else
-      {:error,
-       %{
-         code: "TASK_DUPLICATE",
-         reason: "idempotency key matched but critical fields conflicted",
-         conflict_fields: conflict_fields,
-         task: existing_task
-       }}
+      {:ok, %{idempotent_hit: false}}
     end
   end
 
