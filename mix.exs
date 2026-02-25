@@ -46,6 +46,7 @@ defmodule Men.MixProject do
        github: "tailwindlabs/heroicons",
        tag: "v2.1.1",
        sparse: "optimized",
+       only: [:dev, :prod],
        app: false,
        compile: false,
        depth: 1},
