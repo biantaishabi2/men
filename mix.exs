@@ -8,6 +8,7 @@ defmodule Men.MixProject do
       elixir: "~> 1.14",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      preferred_cli_env: preferred_cli_env(),
       aliases: aliases(),
       deps: deps()
     ]
@@ -81,5 +82,13 @@ defmodule Men.MixProject do
         "phx.digest"
       ]
     ]
+  end
+
+  defp preferred_cli_env do
+    if System.get_env("CI") in ["1", "true", "TRUE"] do
+      [{:"deps.get", :test}]
+    else
+      []
+    end
   end
 end
