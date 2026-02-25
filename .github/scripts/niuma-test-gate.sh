@@ -149,9 +149,7 @@ cleanup_dependency_artifacts() {
     _build/test/lib/*/.mix
 }
 
-# 首次尝试前先清理一次，避免 runner 缓存里的半拉取状态影响首轮结果。
-cleanup_dependency_artifacts
-
+# 首轮优先复用缓存，失败后再清理半拉取状态并重试，避免每次都触发全量网络拉取。
 for attempt in $(seq 1 "$max_attempts"); do
   log "deps.get attempt=${attempt}/${max_attempts} timeout=${deps_get_timeout_seconds}s"
   if command -v timeout >/dev/null 2>&1; then
