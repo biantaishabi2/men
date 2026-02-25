@@ -8,6 +8,7 @@ defmodule Men.MixProject do
       elixir: "~> 1.14",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      preferred_cli_env: preferred_cli_env(),
       aliases: aliases(),
       deps: deps()
     ]
@@ -42,13 +43,7 @@ defmodule Men.MixProject do
       {:floki, ">= 0.30.0", only: :test},
       {:esbuild, "~> 0.8", runtime: Mix.env() == :dev},
       {:tailwind, "~> 0.2.0", runtime: Mix.env() == :dev},
-      {:heroicons,
-       github: "tailwindlabs/heroicons",
-       tag: "v2.1.1",
-       sparse: "optimized",
-       app: false,
-       compile: false,
-       depth: 1},
+      {:heroicons_css, "~> 2.2", only: [:dev, :prod], app: false, compile: false},
       {:swoosh, "~> 1.5"},
       {:finch, "~> 0.13"},
       {:telemetry_metrics, "~> 1.0"},
@@ -80,5 +75,13 @@ defmodule Men.MixProject do
         "phx.digest"
       ]
     ]
+  end
+
+  defp preferred_cli_env do
+    if System.get_env("CI") in ["1", "true", "TRUE"] do
+      [{:"deps.get", :test}]
+    else
+      []
+    end
   end
 end

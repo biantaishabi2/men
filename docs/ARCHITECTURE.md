@@ -333,6 +333,98 @@ lib/
 
 ---
 
+## 任务调度契约（sub#67 基线）
+
+本节只定义契约，不引入调度执行实现。后续 Scheduler/Infra/Container 子任务必须引用本契约，禁止二义性扩展。
+
+### 契约边界
+
+- 任务主标识：`task_id`
+- 调度类型：`schedule_type`（当前固定 `at`）
+- 幂等键：`idempotency_key`（调用方可选业务键）
+- 状态集合：`pending | ready | running | succeeded | failed | cancelled`
+- 终态：`succeeded | failed | cancelled`，终态后禁止回到非终态
+
+### Task 字段定义
+
+| 字段 | 类型 | 约束/语义 |
+|---|---|---|
+| `task_id` | string | 系统主标识，必须唯一 |
+| `schedule_type` | enum | 当前仅 `at` |
+| `scheduled_at` | UTC ISO8601 | 计划触发时间 |
+| `state` | enum | 见状态集合 |
+| `attempt` | integer | 从 `1` 开始，表示当前第几次执行尝试 |
+| `max_retries` | integer | 最大额外重试次数 |
+| `timeout_ms` | integer | 单次执行超时（start_to_close） |
+| `idempotency_key` | string? | 可选业务幂等键 |
+| `last_error_code` | string? | 最近失败错误码 |
+| `last_error_reason` | string? | 最近失败原因 |
+| `created_at` | UTC ISO8601 | 创建时间 |
+| `updated_at` | UTC ISO8601 | 最近更新时间 |
+| `started_at` | UTC ISO8601? | 最近一次尝试开始时间 |
+| `finished_at` | UTC ISO8601? | 进入终态时间 |
+
+`max_attempts = 1 + max_retries`
+
+### 状态转移矩阵
+
+| From | To | 合法性 | 说明 |
+|---|---|---|---|
+| `pending` | `ready` | 允许 | 进入可执行队列 |
+| `ready` | `running` | 允许 | 开始执行 |
+| `running` | `succeeded` | 允许 | 执行成功进入终态 |
+| `running` | `failed` | 允许 | 不可重试或重试耗尽 |
+| `running` | `ready` | 允许 | 失败但仍可重试 |
+| `pending` | `cancelled` | 允许 | 未执行即取消 |
+| `ready` | `cancelled` | 允许 | 排队中取消 |
+| `running` | `cancelled` | 允许 | 执行中取消 |
+| 其他 | 其他 | 禁止 | 统一返回 `TASK_INVALID_TRANSITION` |
+
+### 错误码契约
+
+| 错误码 | 触发条件 | 是否可触发重试 |
+|---|---|---|
+| `TASK_INVALID_TRANSITION` | 发生非法状态转移 | 否 |
+| `TASK_TIMEOUT` | 调度层 `start_to_close` 超时 | 是 |
+| `TASK_EXECUTION_FAILED` | RuntimeBridge 返回业务执行失败 | 是 |
+| `TASK_RETRY_EXHAUSTED` | 可重试错误在 `attempt >= 1 + max_retries` 后耗尽 | 否（进入 `failed`） |
+| `TASK_DUPLICATE` | 幂等命中但关键字段冲突 | 否 |
+
+`TASK_TIMEOUT` 与 `TASK_EXECUTION_FAILED` 互斥；二者都可驱动 `running -> ready` 重试。重试耗尽后必须写入 `TASK_RETRY_EXHAUSTED` 并进入 `failed`。
+
+### 幂等规则
+
+- 命中口径：
+  - 同 `task_id` 命中；或
+  - 同作用域内 `idempotency_key` 命中
+- 命中行为：
+  - 不创建新任务
+  - 不触发重复执行
+  - 返回既有任务快照
+  - 响应包含 `idempotent_hit=true`
+- 冲突行为：
+  - 若请求关键字段（建议至少包含 `schedule_type/scheduled_at/timeout_ms/max_retries`）与既有任务不一致
+  - 返回 `TASK_DUPLICATE` 并附冲突字段说明
+
+### 任务状态事件契约
+
+状态事件由 `EventEnvelope.normalize_task_state_event/1` 约束。
+
+- MUST：
+  - `task_id`
+  - `from_state`
+  - `to_state`
+  - `occurred_at`（UTC ISO8601）
+- SHOULD：
+  - `attempt`
+  - `reason_code`
+  - `reason_message`
+  - `idempotent_hit`
+
+事件默认补齐 `meta.audit=true` 与 `meta.replayable=true`，并追加用于回放索引的 `ets_keys`（`task_id/from_state/to_state`）。
+
+---
+
 ## 配置示例
 
 ```elixir

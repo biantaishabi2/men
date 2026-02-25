@@ -3,6 +3,18 @@ defmodule Men.Gateway.EventEnvelope do
   统一事件信封：校验必填字段并规范化轻量事件载荷。
   """
 
+  alias Men.Gateway.Types
+
+  @task_state_event_type "task_state_changed"
+  @task_state_mapping %{
+    "pending" => :pending,
+    "ready" => :ready,
+    "running" => :running,
+    "succeeded" => :succeeded,
+    "failed" => :failed,
+    "cancelled" => :cancelled
+  }
+
   @enforce_keys [
     :type,
     :source,
@@ -87,6 +99,32 @@ defmodule Men.Gateway.EventEnvelope do
 
   def normalize(_), do: {:error, :invalid_event_envelope}
 
+  @doc """
+  任务状态事件契约归一化。
+
+  MUST 字段：
+  - `task_id`
+  - `from_state`
+  - `to_state`
+  - `occurred_at`（UTC ISO8601）
+
+  SHOULD 字段：
+  - `attempt`
+  - `reason_code`
+  - `reason_message`
+  - `idempotent_hit`
+  """
+  @spec normalize_task_state_event(map() | t()) :: {:ok, t()} | {:error, term()}
+  def normalize_task_state_event(attrs) do
+    with {:ok, envelope} <- normalize(attrs),
+         :ok <- validate_task_event_type(envelope.type),
+         {:ok, payload} <- normalize_task_payload(envelope.payload),
+         {:ok, meta} <- normalize_task_event_meta(envelope.meta),
+         ets_keys <- normalize_task_event_ets_keys(envelope.ets_keys, payload) do
+      {:ok, %{envelope | payload: payload, meta: meta, ets_keys: ets_keys}}
+    end
+  end
+
   defp stringify_keys(map) do
     Enum.reduce_while(map, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
       case normalize_key(key) do
@@ -170,4 +208,103 @@ defmodule Men.Gateway.EventEnvelope do
   defp fetch_meta(nil), do: {:ok, %{}}
   defp fetch_meta(value) when is_map(value), do: {:ok, value}
   defp fetch_meta(_), do: {:error, {:invalid_field, :meta}}
+
+  defp validate_task_event_type(@task_state_event_type), do: :ok
+  defp validate_task_event_type(_), do: {:error, {:invalid_field, :type}}
+
+  defp normalize_task_payload(payload) when is_map(payload) do
+    with {:ok, normalized} <- stringify_keys(payload),
+         {:ok, task_id} <- fetch_required_text(normalized, "task_id"),
+         {:ok, from_state} <- fetch_task_state(normalized["from_state"], :from_state),
+         {:ok, to_state} <- fetch_task_state(normalized["to_state"], :to_state),
+         :ok <- validate_task_transition(from_state, to_state),
+         {:ok, occurred_at} <- fetch_occurred_at(normalized["occurred_at"]),
+         {:ok, attempt} <- fetch_optional_positive_integer(normalized["attempt"], :attempt),
+         {:ok, reason_code} <- fetch_optional_text(normalized["reason_code"]),
+         {:ok, reason_message} <- fetch_optional_text(normalized["reason_message"]),
+         {:ok, idempotent_hit} <-
+           fetch_optional_boolean(normalized["idempotent_hit"], :idempotent_hit) do
+      payload =
+        %{
+          task_id: task_id,
+          from_state: from_state,
+          to_state: to_state,
+          occurred_at: occurred_at
+        }
+        |> maybe_put(:attempt, attempt)
+        |> maybe_put(:reason_code, reason_code)
+        |> maybe_put(:reason_message, reason_message)
+        |> maybe_put(:idempotent_hit, idempotent_hit)
+
+      {:ok, payload}
+    end
+  end
+
+  defp normalize_task_payload(_), do: {:error, {:invalid_field, :payload}}
+
+  defp fetch_task_state(value, field) when is_atom(value) do
+    if value in Types.task_states(), do: {:ok, value}, else: {:error, {:invalid_field, field}}
+  end
+
+  defp fetch_task_state(value, field) when is_binary(value) do
+    value
+    |> String.trim()
+    |> then(&Map.get(@task_state_mapping, &1))
+    |> case do
+      nil -> {:error, {:invalid_field, field}}
+      state -> {:ok, state}
+    end
+  end
+
+  defp fetch_task_state(_, field), do: {:error, {:invalid_field, field}}
+
+  defp validate_task_transition(from_state, to_state) do
+    case Types.validate_task_transition(from_state, to_state) do
+      :ok ->
+        :ok
+
+      {:error, %{code: code}} ->
+        {:error, %{code: code, from_state: from_state, to_state: to_state}}
+    end
+  end
+
+  defp fetch_occurred_at(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    with {:ok, dt, 0} <- DateTime.from_iso8601(trimmed) do
+      {:ok, DateTime.to_iso8601(dt)}
+    else
+      _ -> {:error, {:invalid_field, :occurred_at}}
+    end
+  end
+
+  defp fetch_occurred_at(_), do: {:error, {:invalid_field, :occurred_at}}
+
+  defp fetch_optional_positive_integer(nil, _field), do: {:ok, nil}
+
+  defp fetch_optional_positive_integer(value, _field) when is_integer(value) and value > 0,
+    do: {:ok, value}
+
+  defp fetch_optional_positive_integer(_, field), do: {:error, {:invalid_field, field}}
+
+  defp normalize_task_event_meta(meta) when is_map(meta) do
+    {:ok,
+     meta
+     |> Map.put_new(:audit, true)
+     |> Map.put_new(:replayable, true)}
+  end
+
+  defp normalize_task_event_meta(_), do: {:error, {:invalid_field, :meta}}
+
+  defp normalize_task_event_ets_keys(ets_keys, payload) do
+    [
+      payload.task_id,
+      Atom.to_string(payload.from_state),
+      Atom.to_string(payload.to_state) | ets_keys
+    ]
+    |> Enum.uniq()
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 end
